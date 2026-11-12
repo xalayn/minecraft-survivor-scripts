@@ -2,7 +2,11 @@
 -- Requires a Command Computer (CC:Tweaked) and Minecraft 1.19.4+.
 --
 -- The box is made of display entities: no collision, no real blocks placed.
--- The area must be loaded for the entities to be summoned, listed or cleared.
+-- Boxes are recorded in command storage (ccbox:registry, saved with the world),
+-- including which chunks their entities are in. Drawing and removing briefly
+-- forceload those chunks (at most a few per box, at its corners), so boxes can
+-- be drawn anywhere in the computer's dimension, and listed and removed from
+-- any command computer regardless of where they are.
 --
 -- Usage:
 --   box <x1> <y1> <z1> <x2> <y2> <z2> [block] [name] [options]
@@ -15,9 +19,9 @@
 --   block   Block to draw edges with (default: lime_concrete).
 --   name    Box name. Drawing again with the same name replaces that box.
 --           Without a name, the box gets the first free name box1, box2, ...
---   list    Show all boxes in loaded chunks, with their corners and size.
+--   list    Show all boxes, with their corners and size.
 --   remove  Remove the box with that name.
---   clear   Remove all boxes in loaded chunks. Asks for confirmation first.
+--   clear   Remove all boxes. Asks for confirmation first.
 --
 -- Options (may appear anywhere after `box`):
 --   -y, --yes             clear: don't ask for confirmation.
@@ -53,7 +57,6 @@ local THICKNESS = 0.0625 -- edge thickness in blocks (1 pixel)
 local WALL_INSET = 0.01  -- walls sit this far inside the box, so they don't z-fight with blocks
 local DEFAULT_OPACITY = 20
 local BASE_TAG = "ccbox"
-local INFO_TAG = "ccbox_info:" -- carried by one edge per box: "<name>|x0,y0,z0|x1,y1,z1"
 
 -- Vanilla dye text colors, longest names first so "light_blue" matches before "blue".
 local COLORS = {
@@ -144,65 +147,212 @@ local function run(cmd)
   return ok
 end
 
-local function remove(name)
-  name = sanitize(name)
-  local ok = commands.exec("kill @e[tag=" .. tagFor(name) .. "]")
-  if ok then
-    print("Removed box '" .. name .. "'")
-  else
-    printError("No box named '" .. name .. "' in loaded chunks")
+-- The computer's dimension, e.g. "minecraft:overworld". There's no command
+-- that just prints it, but forceload query's message names it, forced or not.
+local currentDim
+local function dimension()
+  if not currentDim then
+    local x, _, z = commands.getBlockPosition()
+    local _, out = commands.exec(string.format("forceload query %d %d", x, z))
+    currentDim = (out and out[1] or ""):match(" in (%S+) is ") or "minecraft:overworld"
   end
+  return currentDim
 end
 
-local function clear(skipConfirm)
-  if not skipConfirm then
-    write("Remove ALL boxes in loaded chunks? [y/N] ")
-    local answer = read()
-    if not answer or answer:lower() ~= "y" and answer:lower() ~= "yes" then
-      print("Cancelled.")
-      return
-    end
-  end
-  local ok, out = commands.exec("kill @e[tag=" .. BASE_TAG .. "]")
-  print(ok and (out[1] or "Cleared") or "No boxes to clear")
+-- Run a command in a dimension.
+local function execIn(dim, cmd)
+  return commands.exec("execute in " .. dim .. " run " .. cmd)
 end
 
--- Boxes in loaded chunks, as { name, from = "x,y,z", to = "x,y,z" }.
-local function findBoxes()
-  local _, out = commands.exec(
-    "execute as @e[type=minecraft:block_display,tag=" .. BASE_TAG .. "] run data get entity @s Tags")
+-- Registry of boxes in command storage, so boxes can be listed and removed
+-- even when their chunks aren't loaded. Each entry is a string:
+--   "<dimension>|x0,y0,z0|x1,y1,z1|<entity count>|cx,cz;cx,cz;..."
+-- holding the box's dimension, corner blocks, how many entities it consists
+-- of, and the chunks those entities are stored in.
+local REGISTRY = "ccbox:registry"
+
+local function parseEntry(s)
+  local dim, from, to, count, chunkList = s:match("^([^|]*)|([^|]*)|([^|]*)|(%d+)|(.*)$")
+  if not dim then
+    -- Older entries had no dimension.
+    from, to, count, chunkList = s:match("^([^|]*)|([^|]*)|(%d+)|(.*)$")
+    if not from then return nil end
+    dim = dimension()
+  end
+  local e = { dim = dim, from = {}, to = {}, count = tonumber(count), chunks = {} }
+  for n in from:gmatch("-?%d+") do e.from[#e.from + 1] = tonumber(n) end
+  for n in to:gmatch("-?%d+") do e.to[#e.to + 1] = tonumber(n) end
+  for a, b in chunkList:gmatch("(-?%d+),(-?%d+)") do
+    e.chunks[#e.chunks + 1] = { tonumber(a), tonumber(b) }
+  end
+  return e
+end
+
+local function formatEntry(e)
+  local chunks = {}
+  for i, c in ipairs(e.chunks) do chunks[i] = c[1] .. "," .. c[2] end
+  return string.format("%s|%d,%d,%d|%d,%d,%d|%d|%s", e.dim, e.from[1], e.from[2], e.from[3],
+    e.to[1], e.to[2], e.to[3], e.count, table.concat(chunks, ";"))
+end
+
+-- All registered boxes, as a name -> entry table.
+local function registryAll()
+  local ok, out = commands.exec("data get storage " .. REGISTRY .. " boxes")
   local boxes = {}
-  for _, line in ipairs(out or {}) do
-    local info = line:match(INFO_TAG .. "([^\"']+)")
-    if info then
-      local name, a, b = info:match("^(.-)|(.-)|(.-)$")
-      if name then boxes[#boxes + 1] = { name = name, from = a, to = b } end
-    end
+  if not ok then return boxes end
+  local text = table.concat(out, " ")
+  for key, val in text:gmatch('"?([%w_%-%.%+]+)"?%s*:%s*"([^"]*)"') do
+    boxes[key] = parseEntry(val)
   end
   return boxes
 end
 
--- First "boxN" name not used by a box in loaded chunks.
+local function registrySet(name, e)
+  commands.exec(string.format('data modify storage %s boxes."%s" set value "%s"',
+    REGISTRY, name, formatEntry(e)))
+end
+
+local function registryRemove(name)
+  commands.exec(string.format('data remove storage %s boxes."%s"', REGISTRY, name))
+end
+
+-- Run fn with the given chunks of a dimension loaded. Chunks that weren't
+-- already forceloaded are forceloaded for the duration and released
+-- afterwards; chunks that something else forceloaded are left alone.
+local function withChunksLoaded(dim, chunks, fn)
+  local added = {}
+  for _, c in ipairs(chunks) do
+    local bx, bz = c[1] * 16, c[2] * 16
+    local ok, out = execIn(dim, string.format("forceload query %d %d", bx, bz))
+    local forced = ok and not (out[1] or ""):find("not marked")
+    if not forced and execIn(dim, string.format("forceload add %d %d", bx, bz)) then
+      added[#added + 1] = c
+    end
+  end
+  local ok, err = pcall(fn)
+  for _, c in ipairs(added) do
+    execIn(dim, string.format("forceload remove %d %d", c[1] * 16, c[2] * 16))
+  end
+  if not ok then error(err, 0) end
+end
+
+local LOAD_TIMEOUT = 5 -- seconds to wait for forceloaded chunks/entities
+
+-- Wait until all the chunks of a dimension are loaded. Returns false on timeout.
+local function waitLoaded(dim, chunks)
+  local deadline = os.clock() + LOAD_TIMEOUT
+  repeat
+    local all = true
+    for _, c in ipairs(chunks) do
+      if not commands.exec(string.format("execute in %s if loaded %d 0 %d", dim, c[1] * 16, c[2] * 16)) then
+        all = false
+        break
+      end
+    end
+    if all then return true end
+    sleep(0.1)
+  until os.clock() > deadline
+  return false
+end
+
+-- Run a kill command and return how many entities it killed.
+local function kill(selector)
+  local ok, out, n = commands.exec("kill " .. selector)
+  if not ok then return 0 end
+  if n then return n end
+  -- Older CC:Tweaked doesn't return the count: "Killed 26 entities" / "Killed <name>".
+  return tonumber((out[1] or ""):match("(%d+)")) or 1
+end
+
+-- Kill a box's entities, loading its chunks if needed. Returns how many were killed.
+local function killBox(name, entry)
+  local selector = "@e[tag=" .. tagFor(name) .. "]"
+  if not entry then
+    -- Unregistered box: only what's loaded can be reached.
+    return kill(selector)
+  end
+  local killed = 0
+  withChunksLoaded(entry.dim, entry.chunks, function()
+    -- Entities load a little after their chunk does, so keep killing until all
+    -- of them are gone or we time out.
+    local deadline = os.clock() + LOAD_TIMEOUT
+    repeat
+      killed = killed + kill(selector)
+      if killed >= entry.count then return end
+      sleep(0.1)
+    until os.clock() > deadline
+  end)
+  return killed
+end
+
+-- Remove a box and its registry entry. Returns false if nothing was found.
+local function removeBox(name, quiet)
+  local entry = registryAll()[name]
+  local killed = killBox(name, entry)
+  if entry and killed < entry.count then
+    -- Keep the rest registered so a later remove can try again.
+    entry.count = entry.count - killed
+    registrySet(name, entry)
+    printError(string.format("Box '%s': removed %d entities, %d didn't load in time. Try again.",
+      name, killed, entry.count))
+    return true
+  end
+  registryRemove(name)
+  if not quiet and (entry or killed > 0) then print("Removed box '" .. name .. "'") end
+  return entry ~= nil or killed > 0
+end
+
+local function remove(name)
+  name = sanitize(name)
+  if not removeBox(name) then
+    printError("No box named '" .. name .. "'")
+  end
+end
+
+local function clear(skipConfirm)
+  local boxes = registryAll()
+  if not skipConfirm then
+    write("Remove ALL boxes? [y/N] ")
+    local answer = (read() or ""):lower()
+    if answer ~= "y" and answer ~= "yes" then
+      print("Cancelled.")
+      return
+    end
+  end
+  local n = 0
+  for name in pairs(boxes) do
+    removeBox(name, true)
+    n = n + 1
+  end
+  -- Also catch loaded leftovers that aren't registered.
+  commands.exec("kill @e[tag=" .. BASE_TAG .. "]")
+  print(string.format("Removed %d registered box(es)", n))
+end
+
+-- First "boxN" name not used by a registered box.
 local function nextFreeName()
-  local used = {}
-  for _, bx in ipairs(findBoxes()) do used[bx.name] = true end
+  local used = registryAll()
   local n = 1
   while used["box" .. n] do n = n + 1 end
   return "box" .. n
 end
 
 local function list()
-  local boxes = findBoxes()
-  if #boxes == 0 then
-    print("No boxes found in loaded chunks.")
+  local names = {}
+  local boxes = registryAll()
+  for name in pairs(boxes) do names[#names + 1] = name end
+  if #names == 0 then
+    print("No boxes.")
     return
   end
-  table.sort(boxes, function(p, q) return p.name < q.name end)
-  for _, bx in ipairs(boxes) do
-    local x0, y0, z0 = bx.from:match("(-?%d+),(-?%d+),(-?%d+)")
-    local x1, y1, z1 = bx.to:match("(-?%d+),(-?%d+),(-?%d+)")
-    local size = x0 and string.format("%dx%dx%d", x1 - x0 + 1, y1 - y0 + 1, z1 - z0 + 1) or "?"
-    print(string.format("%s  %s -> %s  (%s)", bx.name, bx.from, bx.to, size))
+  table.sort(names)
+  for _, name in ipairs(names) do
+    local e = boxes[name]
+    local f, t = e.from, e.to
+    print(string.format("%s  %d,%d,%d -> %d,%d,%d  (%dx%dx%d) %s", name,
+      f[1], f[2], f[3], t[1], t[2], t[3],
+      t[1] - f[1] + 1, t[2] - f[2] + 1, t[3] - f[3] + 1,
+      (e.dim:gsub("^minecraft:", ""))))
   end
 end
 
@@ -273,16 +423,23 @@ local dx, dy, dz = x1 - x0, y1 - y0, z1 - z0
 local t = THICKNESS
 local h = t / 2
 
-local function tagList(extra)
-  local tags = { BASE_TAG, tagFor(name) }
-  if extra then tags[#tags + 1] = extra end
-  for i, tg in ipairs(tags) do tags[i] = '"' .. tg .. '"' end
-  return "Tags:[" .. table.concat(tags, ",") .. "]"
-end
-
+local TAGS = string.format('Tags:["%s","%s"]', BASE_TAG, tagFor(name))
 local FULLBRIGHT = "brightness:{sky:15,block:15}"
 
-local function edge(x, y, z, sx, sy, sz, extraTag)
+-- Chunks the box's entities are stored in (an entity lives in the chunk
+-- containing its position), for loading them again on remove.
+local chunks, chunkSeen = {}, {}
+local function track(x, z)
+  local c = { math.floor(x / 16), math.floor(z / 16) }
+  local key = c[1] .. "," .. c[2]
+  if not chunkSeen[key] then
+    chunkSeen[key] = true
+    chunks[#chunks + 1] = c
+  end
+end
+
+local function edge(x, y, z, sx, sy, sz)
+  track(x, z)
   -- width/height is the client's culling box (centered horizontally on the
   -- entity, extending up); size it to cover what's rendered.
   -- view_range keeps large boxes visible from afar.
@@ -295,7 +452,7 @@ local function edge(x, y, z, sx, sy, sz, extraTag)
       .. "transformation:{left_rotation:[0f,0f,0f,1f],right_rotation:[0f,0f,0f,1f],"
       .. "translation:[0f,0f,0f],scale:[%.4ff,%.4ff,%.4ff]},"
       .. "width:%.4ff,height:%.4ff,view_range:4f,%s,%s%s}",
-    x, y, z, block, sx, sy, sz, 2 * math.max(sx, sz), sy, FULLBRIGHT, glow, tagList(extraTag))
+    x, y, z, block, sx, sy, sz, 2 * math.max(sx, sz), sy, FULLBRIGHT, glow, TAGS)
 end
 
 -- Walls are text_displays showing a single space with a translucent background,
@@ -324,6 +481,7 @@ if argb >= 0x80000000 then argb = argb - 0x100000000 end -- NBT ints are signed
 -- A one-sided panel with its corner at (x, y, z), w long along the orientation's
 -- ex axis and l long along its ey axis.
 local function panel(dir, x, y, z, w, l)
+  track(x, z)
   local o = ORIENT[dir]
   local sx, sy = w / QUAD_W, l / QUAD_H
   -- Shift so the quad's left edge (local x = QUAD_X0) lands on the entity position.
@@ -336,13 +494,11 @@ local function panel(dir, x, y, z, w, l)
       .. "translation:[%.4ff,%.4ff,%.4ff],scale:[%.4ff,%.4ff,1f]},"
       .. "width:%.4ff,height:%.4ff,view_range:4f,%s,%s}",
     x, y, z, wallText, argb, o.q[1], o.q[2], o.q[3], o.q[4], tx, ty, tz, sx, sy,
-    2 * (w + l), height, FULLBRIGHT, tagList())
+    2 * (w + l), height, FULLBRIGHT, TAGS)
 end
 
 -- Redrawing a box with the same name replaces it.
-commands.exec("kill @e[tag=" .. tagFor(name) .. "]")
-
-local info = string.format("%s%s|%d,%d,%d|%d,%d,%d", INFO_TAG, name, bx0, by0, bz0, bx1, by1, bz1)
+removeBox(name, true)
 
 -- Edges are centered on the box boundary (half inside, half outside) so none
 -- of their faces are coplanar with block faces (no z-fighting with terrain).
@@ -351,8 +507,7 @@ local info = string.format("%s%s|%d,%d,%d|%d,%d,%d", INFO_TAG, name, bx0, by0, b
 local parts = {}
 for _, a in ipairs({ y0 - h, y1 - h }) do
   for _, b in ipairs({ z0 - h, z1 - h }) do
-    -- The first edge carries the box's info for `box list`.
-    parts[#parts + 1] = edge(x0 - h, a, b, dx + t, t, t, #parts == 0 and info or nil) -- along X
+    parts[#parts + 1] = edge(x0 - h, a, b, dx + t, t, t) -- along X
   end
 end
 for _, a in ipairs({ x0 - h, x1 - h }) do
@@ -386,9 +541,23 @@ if opts.walls then
   end
 end
 
+-- Load the chunks (so boxes can be drawn anywhere), summon, and register.
 local failed = 0
-for _, cmd in ipairs(parts) do
-  if not run(cmd) then failed = failed + 1 end
+local dim = dimension()
+withChunksLoaded(dim, chunks, function()
+  if not waitLoaded(dim, chunks) then
+    printError("Timed out waiting for chunks to load")
+  end
+  for _, cmd in ipairs(parts) do
+    if not run(cmd) then failed = failed + 1 end
+  end
+end)
+
+if failed < #parts then
+  registrySet(name, {
+    dim = dim, from = { bx0, by0, bz0 }, to = { bx1, by1, bz1 },
+    count = #parts - failed, chunks = chunks,
+  })
 end
 
 if failed == 0 then
@@ -396,5 +565,5 @@ if failed == 0 then
   print(string.format("Box '%s' drawn: %dx%dx%d (%s%s%s)", name, dx, dy, dz, block,
     walls, opts.xray and ", xray" or ""))
 else
-  printError(string.format("%d/%d parts failed (is the area loaded?)", failed, #parts))
+  printError(string.format("%d/%d parts failed", failed, #parts))
 end
