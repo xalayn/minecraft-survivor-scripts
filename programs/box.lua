@@ -255,6 +255,17 @@ local function waitLoaded(dim, chunks)
     if all then return true end
     sleep(0.1)
   until os.clock() > deadline
+
+  -- Timed out: show what the server says about each chunk, to diagnose.
+  printError("Chunks not loaded after " .. LOAD_TIMEOUT .. "s (" .. dim .. "):")
+  for _, c in ipairs(chunks) do
+    local bx, bz = c[1] * 16, c[2] * 16
+    local _, q = commands.exec(string.format("execute in %s run forceload query %d %d", dim, bx, bz))
+    local loaded, l = commands.exec(string.format("execute in %s if loaded %d 0 %d", dim, bx, bz))
+    print(string.format(" %d,%d loaded=%s", bx, bz, tostring(loaded)))
+    print("  query: " .. tostring(q and q[1]))
+    if not loaded then print("  if loaded: " .. tostring(l and l[1])) end
+  end
   return false
 end
 
