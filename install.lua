@@ -48,6 +48,24 @@ print("Installing " .. OWNER .. "/" .. REPO .. " @ " .. sha:sub(1, 7))
 local tree = getJSON(api .. "/git/trees/" .. sha .. "?recursive=1")
 local raw = "https://raw.githubusercontent.com/" .. OWNER .. "/" .. REPO .. "/" .. sha .. "/"
 
+-- Update the installer itself first. If it changed, hand over to the new
+-- version so changes to the install logic apply in the same run.
+do
+  local self = shell.getRunningProgram()
+  local latest = get(raw .. "install.lua")
+  local f = fs.open(self, "r")
+  local current = f and f.readAll()
+  if f then f.close() end
+  if latest ~= current then
+    f = fs.open(self, "w")
+    f.write(latest)
+    f.close()
+    print("Installer updated, restarting it...")
+    shell.run(self, ref)
+    return
+  end
+end
+
 local function download(path, dest)
   local f = fs.open(dest, "w")
   f.write(get(raw .. path))
@@ -67,9 +85,6 @@ for _, entry in ipairs(tree.tree) do
     end
   end
 end
-
--- Keep the installer itself up to date.
-download("install.lua", "/install.lua")
 
 -- Make /bin programs runnable by name on every boot.
 local startup = "/startup/00-bin-path.lua"
