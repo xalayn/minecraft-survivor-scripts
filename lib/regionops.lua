@@ -148,11 +148,13 @@ function M.features()
   return true, list
 end
 
---- A player's block position and dimension: { x, y, z, dim }.
-function M.playerPos(player)
-  if type(player) ~= "string" or not player:match("^[%w_]+$") then
-    return false, "Bad player name"
-  end
+local function validPlayer(player)
+  return type(player) == "string" and player:match("^[%w_]+$") ~= nil
+end
+
+-- A player's exact position: { x, y, z, dim }, or nil and an error.
+local function exactPos(player)
+  if not validPlayer(player) then return nil, "Bad player name" end
   local results = cmd.execAll({
     "data get entity " .. player .. " Pos",
     "data get entity " .. player .. " Dimension",
@@ -160,9 +162,41 @@ function M.playerPos(player)
   local pos = cmd.parsePositions(results[1].out)[1]
   local dim = cmd.lastId(cmd.parseStoredString(results[2].out))
   if not pos or not dim then
-    return false, "Couldn't find player " .. player .. " (online?)"
+    return nil, "Couldn't find player " .. player .. " (online?)"
   end
-  return true, { math.floor(pos.x), math.floor(pos.y), math.floor(pos.z), dim = dim }
+  return { x = pos.x, y = pos.y, z = pos.z, dim = dim }
+end
+
+--- A player's block position and dimension: { x, y, z, dim }.
+function M.playerPos(player)
+  local p, err = exactPos(player)
+  if not p then return false, err end
+  return true, { math.floor(p.x), math.floor(p.y), math.floor(p.z), dim = p.dim }
+end
+
+--- Names of the regions a player is standing in (sorted; empty if none).
+function M.regionsAt(player)
+  local p, err = exactPos(player)
+  if not p then return false, err end
+  local names = {}
+  for name, r in pairs(regions.all()) do
+    if r.dim == p.dim and regions.contains(r, p.x, p.y, p.z) then names[#names + 1] = name end
+  end
+  table.sort(names)
+  return true, names
+end
+
+--- Teleport a player to the middle of a region's floor. Returns the
+-- destination { x, y, z, dim }.
+function M.teleport(player, name)
+  if not validPlayer(player) then return false, "Bad player name" end
+  local r, err = findRegion(name)
+  if not r then return false, err end
+  local a = r.area
+  local x, y, z = (a[1] + a[4] + 1) / 2, a[2], (a[3] + a[6] + 1) / 2
+  local ok, out = commands.exec(string.format("execute in %s run tp %s %.1f %d %.1f", r.dim, player, x, y, z))
+  if not ok then return false, (out and out[1]) or "Teleport failed" end
+  return true, { x, y, z, dim = r.dim }
 end
 
 --- Who runs regiond, or nil.

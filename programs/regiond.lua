@@ -179,6 +179,8 @@ local HANDLERS = {
   delete = regionops.delete,
   features = regionops.features,
   playerPos = regionops.playerPos,
+  regionsAt = regionops.regionsAt,
+  teleport = regionops.teleport,
   status = regionops.status,
 }
 

@@ -3,7 +3,10 @@
 -- so regiond must be running somewhere with a modem too.
 --
 -- What it does:
---   - Lists regions; pick one to see it and its features.
+--   - Lists regions, and shows which region(s) you're standing in (updated
+--     every couple of seconds); pick a region to see it and its features.
+--   - Teleport to a region (to the middle of its floor). A boundary you're
+--     confined by still applies, unless you're exempt (e.g. creative).
 --   - Add, change or remove features. Each feature's settings are shown as a
 --     form; the form is built from the feature's options, so new features
 --     appear here automatically.
@@ -178,6 +181,7 @@ local function regionScreen(name)
       items[#items + 1] = { label = "* " .. fname, value = { edit = fname } }
     end
     items[#items + 1] = { label = "+ Add feature", value = "add", color = tui.color("accent") }
+    items[#items + 1] = { label = "Teleport here", value = "teleport" }
     items[#items + 1] = { label = "Delete region", value = "delete", color = tui.color("bad") }
     items[#items + 1] = { label = "< Back", value = "back" }
 
@@ -198,6 +202,14 @@ local function regionScreen(name)
         options[#options + 1] = { label = "< Back", value = "back" }
         local fname = tui.menu(r.name .. ": add", options, { info = descriptions })
         if fname and fname ~= "back" then featureForm(r.name, all[fname], nil) end
+      end
+    elseif choice == "teleport" then
+      local dest = call("teleport", settings.get(PLAYER_SETTING), r.name)
+      if dest then
+        tui.message(r.name, {
+          "Teleported to the middle of " .. r.name .. "'s floor:",
+          string.format("%.1f, %d, %.1f", dest[1], dest[2], dest[3]),
+        }, "good")
       end
     elseif choice == "delete" then
       if tui.confirm(r.name, { "Delete region " .. r.name .. "?", "Its features are removed too." }, "Delete") then
@@ -328,9 +340,24 @@ local function main()
   end
   if not settings.get(PLAYER_SETTING) then askPlayer() end
 
+  -- Regions, and the ones the player is in. Refreshed every few seconds
+  -- (quietly: no busy screen, errors only shown as "location unknown").
+  local all, here
+  local function refresh(quiet)
+    if quiet then
+      local ok, result = rpc.call("list", 5)
+      if ok then all = result end
+    else
+      all = call("list")
+    end
+    local ok, names = rpc.call("regionsAt", 5, settings.get(PLAYER_SETTING))
+    here = ok and names or nil
+  end
+
+  refresh(false)
+  local sel = 1
   while true do
     local items = {}
-    local all = call("list")
     if all then
       for _, name in ipairs(sortedKeys(all)) do
         local feats = sortedKeys(all[name].features)
@@ -346,12 +373,27 @@ local function main()
     items[#items + 1] = { label = "Settings", value = "settings" }
     items[#items + 1] = { label = "Quit", value = "quit" }
 
-    local info = all and next(all) == nil and { "No regions yet." } or nil
-    local choice = tui.menu(APP, items, { info = info })
-    if choice == nil or choice == "quit" then return end
-    if choice == "new" then newRegion()
-    elseif choice == "settings" then settingsScreen()
-    elseif type(choice) == "table" then regionScreen(choice.region)
+    local info = {}
+    if not here then
+      info[1] = "Your location: unknown"
+    elseif #here == 0 then
+      info[1] = "You're not in a region."
+    else
+      info[1] = "You're in: " .. table.concat(here, ", ")
+    end
+    if all and next(all) == nil then info[#info + 1] = "No regions yet." end
+
+    local choice
+    choice, sel = tui.menu(APP, items, { info = info, selected = sel, refresh = 2 })
+    if choice == tui.REFRESH then
+      refresh(true)
+    else
+      if choice == nil or choice == "quit" then return end
+      if choice == "new" then newRegion()
+      elseif choice == "settings" then settingsScreen()
+      elseif type(choice) == "table" then regionScreen(choice.region)
+      end
+      refresh(false)
     end
   end
 end

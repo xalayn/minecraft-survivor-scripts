@@ -97,12 +97,19 @@ local function hint(text)
   term.setTextColor(C.fg)
 end
 
+--- Returned by menu() when opts.refresh seconds pass without a choice.
+M.REFRESH = setmetatable({}, { __tostring = function() return "tui.REFRESH" end })
+
 --- Show a menu. items: list of { label, value, color }. opts.info: lines of
--- text above the items; opts.selected: initially selected index.
--- Returns the chosen item's value, or nil if the user went back.
+-- text above the items; opts.selected: initially selected index;
+-- opts.refresh: seconds after which to return M.REFRESH (so the caller can
+-- update what's shown).
+-- Returns the chosen item's value (nil if the user went back), and the
+-- selected index.
 function M.menu(title, items, opts)
   opts = opts or {}
   local sel, scroll = math.min(opts.selected or 1, #items), 0
+  local timer = opts.refresh and os.startTimer(opts.refresh)
   while true do
     local w, h = screen(title)
     local top = drawInfo(opts.info, 2, w, C.dim)
@@ -132,14 +139,16 @@ function M.menu(title, items, opts)
     if ev == "key" then
       if a == keys.up then sel = sel > 1 and sel - 1 or #items
       elseif a == keys.down then sel = sel < #items and sel + 1 or 1
-      elseif a == keys.enter or a == keys.numPadEnter then return items[sel].value
-      elseif a == keys.backspace then return nil
+      elseif a == keys.enter or a == keys.numPadEnter then return items[sel].value, sel
+      elseif a == keys.backspace then return nil, sel
       end
     elseif ev == "mouse_click" then
       local idx = y - top + 1 + scroll
-      if y >= top and y < top + rows and items[idx] then return items[idx].value end
+      if y >= top and y < top + rows and items[idx] then return items[idx].value, idx end
     elseif ev == "mouse_scroll" then
       sel = math.max(1, math.min(#items, sel + a))
+    elseif ev == "timer" and a == timer then
+      return M.REFRESH, sel
     end
   end
 end
