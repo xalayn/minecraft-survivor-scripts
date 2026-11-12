@@ -281,50 +281,56 @@ end
 
 -- Run a kill command and return how many entities it killed.
 local function kill(selector)
-  local ok, out, n = commands.exec("kill " .. selector)
+  local ok, out = commands.exec("kill " .. selector)
   if not ok then return 0 end
-  if n then return n end
-  -- Older CC:Tweaked doesn't return the count: "Killed 26 entities" / "Killed <name>".
-  return tonumber((out[1] or ""):match("(%d+)")) or 1
+  -- The message is "Killed 26 entities" or, for one entity, "Killed <name>".
+  -- (commands.exec's third return value isn't the kill count, so don't use it.)
+  return tonumber((out[1] or ""):match("(%d+) entities")) or 1
 end
 
--- Kill a box's entities, loading its chunks if needed. Returns how many were killed.
+-- How long to keep looking for stragglers once the chunks report loaded.
+local GRACE = 2
+
+-- Kill a box's entities, loading its chunks if needed.
+-- Returns how many were killed, and whether its chunks could be loaded.
 local function killBox(name, entry)
   local selector = "@e[tag=" .. tagFor(name) .. "]"
   if not entry then
     -- Unregistered box: only what's loaded can be reached.
-    return kill(selector)
+    return kill(selector), true
   end
-  local killed = 0
+  local killed, loaded = 0, false
   withChunksLoaded(entry.dim, entry.chunks, function()
-    -- `if loaded` (used by waitLoaded) also requires the chunk's entities to
-    -- be loaded, but keep killing until all are gone in case some lag behind.
     killed = killed + kill(selector)
-    if killed >= entry.count then return end
-    waitLoaded(entry.dim, entry.chunks)
-    local deadline = os.clock() + LOAD_TIMEOUT
+    if killed >= entry.count then loaded = true return end
+    loaded = waitLoaded(entry.dim, entry.chunks)
+    if not loaded then return end
+    -- Chunks (and their entities) are loaded; allow a moment for stragglers.
+    local deadline = os.clock() + GRACE
     repeat
       killed = killed + kill(selector)
       if killed >= entry.count then return end
       sleep(0.1)
     until os.clock() > deadline
   end)
-  return killed
+  return killed, loaded
 end
 
 -- Remove a box and its registry entry. Returns false if nothing was found.
 local function removeBox(name, quiet)
   local entry = registryAll()[name]
-  local killed = killBox(name, entry)
-  if entry and killed < entry.count then
-    -- Keep the rest registered so a later remove can try again.
-    entry.count = entry.count - killed
-    registrySet(name, entry)
-    printError(string.format("Box '%s': removed %d entities, %d didn't load in time. Try again.",
+  local killed, loaded = killBox(name, entry)
+  if not loaded then
+    -- Keep it registered so a later remove can try again.
+    printError(string.format("Box '%s': its chunks didn't load in time (removed %d of %d parts). Try again.",
       name, killed, entry.count))
     return true
   end
   registryRemove(name)
+  if entry and killed < entry.count then
+    print(string.format("Box '%s': only found %d of %d parts; the rest were already gone.",
+      name, killed, entry.count))
+  end
   if not quiet and (entry or killed > 0) then print("Removed box '" .. name .. "'") end
   return entry ~= nil or killed > 0
 end
