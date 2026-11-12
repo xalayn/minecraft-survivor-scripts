@@ -26,7 +26,9 @@
 --   pattern  Lua pattern that strings must match (e.g. "^[%w_:]+$").
 --   check    Optional function(value) returning an error string if invalid.
 --   arg      Placeholder shown in help for non-booleans (default: <type>).
---   desc     Help text.
+--   desc     Help text (command-line help).
+--   hint     Longer explanation for UIs (regionui shows it when the field
+--            name is tapped); falls back to desc.
 --
 -- Accepted forms: --name value, --name=value, -x value, -xvalue, -xy (booleans),
 -- --no-name for booleans, and -- to treat everything after it as positional.

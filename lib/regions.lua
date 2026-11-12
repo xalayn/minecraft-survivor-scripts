@@ -203,8 +203,10 @@ end
 -- options. Both creative and spectator are exempt by default.
 function M.exemptOptions()
   return {
-    { name = "exempt-creative", default = true, desc = "Also affect creative" },
-    { name = "exempt-spectator", default = true, desc = "Also affect spectators" },
+    { name = "exempt-creative", default = true, desc = "Also affect creative",
+      hint = "Leave players in creative mode alone." },
+    { name = "exempt-spectator", default = true, desc = "Also affect spectators",
+      hint = "Leave players in spectator mode alone." },
   }
 end
 

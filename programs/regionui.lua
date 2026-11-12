@@ -242,6 +242,21 @@ local function optionLabel(o)
   return s:sub(1, 1):upper() .. s:sub(2)
 end
 
+-- A field label that shows a hint when tapped.
+local function addHintLabel(parent, x, y, text, hint, color)
+  local label = parent:addLabel({ x = x, y = y, text = text, foreground = color or C.text })
+  label:onClick(function() screen.toast:info(hint, 6) end)
+  return label
+end
+
+local function optionHint(o)
+  local hint = o.hint or o.desc or optionLabel(o)
+  if o.default ~= nil and (o.type or "boolean") ~= "boolean" then
+    hint = hint .. " Default: " .. tostring(o.default) .. "."
+  end
+  return hint
+end
+
 -- The settings of one feature on a region, as switches and text fields.
 -- current: its settings if it's already added.
 local function featureForm(regionName, info, current)
@@ -249,6 +264,7 @@ local function featureForm(regionName, info, current)
   newScreen(title, function() task(regionScreen, regionName) end)
 
   local _, y = addText(3, info.description or info.name)
+  if #info.options > 0 then _, y = addText(y, "Tap a name for help.", C.faint) end
   local form = root:addFrame({ x = 1, y = y + 1, width = W, height = H - y - 2,
     background = C.bg, scrollable = true })
 
@@ -258,7 +274,7 @@ local function featureForm(regionName, info, current)
   for _, o in ipairs(info.options) do
     local value = current and current[o.name]
     if value == nil then value = o.default end
-    form:addLabel({ x = 2, y = row, text = optionLabel(o), foreground = C.text })
+    addHintLabel(form, 2, row, optionLabel(o), optionHint(o))
     if (o.type or "boolean") == "boolean" then
       controls[o.name] = form:addSwitch({ x = W - 5, y = row, width = 4, checked = value == true,
         onColor = C.primary, offColor = C.faint })
@@ -419,18 +435,21 @@ end
 local function settingsScreen()
   newScreen("Settings", function() task(mainScreen) end)
 
-  root:addLabel({ x = 2, y = 3, text = "Player name", foreground = C.muted })
+  addHintLabel(root, 2, 3, "Player name",
+    "Your Minecraft name. Used to find where you are (corners, You're in, teleport).", C.muted)
   local playerInput = root:addInput({ x = 2, y = 4, width = W - 2, text = player() or "",
     background = C.field, foreground = C.fieldText })
 
-  root:addLabel({ x = 2, y = 6, text = "Server password", foreground = C.muted })
+  addHintLabel(root, 2, 6, "Server password",
+    "Must match region.secret on the regiond computer, if it has one. Leave empty to keep the current one.",
+    C.muted)
   local hasSecret = (settings.get(rpc.SECRET_SETTING) or "") ~= ""
   local secretInput = root:addInput({ x = 2, y = 7, width = W - 2, replaceChar = "*",
     placeholder = hasSecret and "(unchanged)" or "none",
     background = C.field, foreground = C.fieldText, placeholderColor = C.muted })
   addText(8, "Only if the server has one.", C.faint)
 
-  root:addLabel({ x = 2, y = 10, text = "Open on startup", foreground = C.text })
+  addHintLabel(root, 2, 10, "Open on startup", "Open this app automatically when this computer turns on.")
   local bootSwitch = root:addSwitch({ x = W - 5, y = 10, width = 4, checked = fs.exists(STARTUP),
     onColor = C.primary, offColor = C.faint })
 
