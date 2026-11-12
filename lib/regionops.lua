@@ -1,5 +1,5 @@
 -- regionops: the operations on regions, shared by the region program (run
--- locally) and regiond (run on behalf of pocket computers via lib/rpc).
+-- locally) and controld (on behalf of pocket computers, via the regions module).
 --
 -- Every function returns true and a result, or false and an error message.
 -- Inputs may come from the network, so everything that ends up in a command
@@ -9,6 +9,8 @@
 local args = require("args")
 local cmd = require("cmd")
 local regions = require("regions")
+local control = require("control")
+local players = require("players")
 
 local M = {}
 
@@ -106,7 +108,7 @@ function M.setFeature(name, fname, values)
   regions.save(r)
   return true, {
     message = message,
-    needsDaemon = (f.queries or f.act) and not regions.daemon() or false,
+    needsDaemon = (f.queries or f.act) and not control.daemon() or false,
   }
 end
 
@@ -148,31 +150,7 @@ function M.features()
   return true, list
 end
 
-local function validPlayer(player)
-  return type(player) == "string" and player:match("^[%w_]+$") ~= nil
-end
-
--- A player's exact position: { x, y, z, dim }, or nil and an error.
-local function exactPos(player)
-  if not validPlayer(player) then return nil, "Bad player name" end
-  local results = cmd.execAll({
-    "data get entity " .. player .. " Pos",
-    "data get entity " .. player .. " Dimension",
-  })
-  local pos = cmd.parsePositions(results[1].out)[1]
-  local dim = cmd.lastId(cmd.parseStoredString(results[2].out))
-  if not pos or not dim then
-    return nil, "Couldn't find player " .. player .. " (online?)"
-  end
-  return { x = pos.x, y = pos.y, z = pos.z, dim = dim }
-end
-
---- A player's block position and dimension: { x, y, z, dim }.
-function M.playerPos(player)
-  local p, err = exactPos(player)
-  if not p then return false, err end
-  return true, { math.floor(p.x), math.floor(p.y), math.floor(p.z), dim = p.dim }
-end
+local validPlayer, exactPos = players.valid, players.exactPos
 
 --- Names of the regions a player is standing in (sorted; empty if none).
 function M.regionsAt(player)
@@ -199,9 +177,9 @@ function M.teleport(player, name)
   return true, { x, y, z, dim = r.dim }
 end
 
---- Who runs regiond, or nil.
+--- Who runs controld, or nil.
 function M.status()
-  return true, { daemon = regions.daemon() }
+  return true, { daemon = control.daemon() }
 end
 
 return M

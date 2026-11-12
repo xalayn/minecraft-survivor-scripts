@@ -106,6 +106,23 @@ do
   f.close()
 end
 
+-- Programs renamed when regions became part of the control system: keep their
+-- start-on-boot setting working under the new names.
+local RENAMED_STARTUP = {
+  ["/startup/50-regiond.lua"] = { "/startup/50-controld.lua",
+    'if multishell then shell.openTab("/bin/controld") else shell.run("/bin/controld") end\n' },
+  ["/startup/60-regionui.lua"] = { "/startup/60-control.lua", 'shell.run("/bin/control")\n' },
+}
+for old, new in pairs(RENAMED_STARTUP) do
+  if fs.exists(old) then
+    fs.delete(old)
+    local f = fs.open(new[1], "w")
+    f.write(new[2])
+    f.close()
+    print("  " .. old .. " -> " .. new[1])
+  end
+end
+
 -- Make /bin programs runnable by name on every boot.
 local startup = "/startup/00-bin-path.lua"
 if not fs.exists(startup) then

@@ -1,20 +1,27 @@
--- rpc: requests from pocket computers to regiond over rednet.
+-- rpc: requests from pocket computers to controld over rednet.
 --
 -- Needs a wireless or ender modem on both ends (ender modems work at any range
 -- and across dimensions). The server registers itself with rednet.host, so
 -- clients find it without configuration.
 --
--- Password: if the server computer has the setting region.secret set (`set
--- region.secret <password>`), requests must carry the same value, which
--- clients send from their own region.secret setting. With no password set on
+-- Password: if the server computer has the setting control.secret set (`set
+-- control.secret <password>`), requests must carry the same value, which
+-- clients send from their own control.secret setting. With no password set on
 -- the server, every request is accepted. Rednet isn't encrypted, so this keeps
 -- out casual misuse, not a determined eavesdropper.
 
 local M = {}
 
-M.PROTOCOL = "ccregion"
-M.HOSTNAME = "regiond"
-M.SECRET_SETTING = "region.secret"
+M.PROTOCOL = "cccontrol"
+M.HOSTNAME = "controld"
+M.SECRET_SETTING = "control.secret"
+M.OLD_SECRET_SETTING = "region.secret" -- before the rename; still honoured
+
+--- The password set on this computer, if any.
+function M.secret()
+  local s = settings.get(M.SECRET_SETTING) or settings.get(M.OLD_SECRET_SETTING)
+  if s ~= "" then return s end
+end
 
 --- Open a modem for rednet, preferring wireless/ender ones. Returns its side
 -- (peripheral name), or nil and an error.
@@ -44,7 +51,7 @@ function M.handle(handlers, msg, secret)
     return { id = msg.id, ok = ok, result = result }
   end
   if secret and secret ~= "" and msg.secret ~= secret then
-    return reply(false, "Wrong or missing password (region.secret)")
+    return reply(false, "Wrong or missing password (control.secret)")
   end
   local h = handlers[msg.method]
   if not h then return reply(false, "Unknown request: " .. msg.method) end
@@ -60,7 +67,7 @@ function M.serve(handlers, log)
   rednet.host(M.PROTOCOL, M.HOSTNAME)
   while true do
     local sender, msg = rednet.receive(M.PROTOCOL)
-    local response = M.handle(handlers, msg, settings.get(M.SECRET_SETTING))
+    local response = M.handle(handlers, msg, M.secret())
     if response then
       if log then log(string.format("#%d %s%s", sender, msg.method, response.ok and "" or " (refused)")) end
       rednet.send(sender, response, M.PROTOCOL)
@@ -70,23 +77,23 @@ end
 
 local server
 
---- Call a method on regiond. Returns ok, result (or false, error message).
+--- Call a method on controld (method: "<module>.<method>"). Returns ok, result (or false, error message).
 function M.call(method, timeout, ...)
   if not server then
     server = rednet.lookup(M.PROTOCOL, M.HOSTNAME)
-    if not server then return false, "Can't reach regiond. Is it running, with a modem?" end
+    if not server then return false, "Can't reach controld. Is it running, with a modem?" end
   end
   local id = tostring(math.random(1, 2 ^ 30)) .. tostring(os.epoch("utc"))
   rednet.send(server, {
     id = id, method = method, params = table.pack(...),
-    secret = settings.get(M.SECRET_SETTING),
+    secret = M.secret(),
   }, M.PROTOCOL)
   local deadline = os.clock() + (timeout or 10)
   while true do
     local remaining = deadline - os.clock()
     if remaining <= 0 then
       server = nil -- look it up again next time, in case it moved
-      return false, "regiond didn't answer in time."
+      return false, "controld didn't answer in time."
     end
     local sender, response = rednet.receive(M.PROTOCOL, remaining)
     if sender == server and type(response) == "table" and response.id == id then

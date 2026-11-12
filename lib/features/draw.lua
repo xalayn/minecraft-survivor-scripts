@@ -1,5 +1,5 @@
 -- draw: show the region as a box (see the box program). The drawing is made
--- when the feature is added and removed with it; it needs no regiond.
+-- when the feature is added and removed with it; it needs no controld.
 
 local boxdraw = require("boxdraw")
 

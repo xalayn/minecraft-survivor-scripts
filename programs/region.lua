@@ -2,9 +2,9 @@
 -- Requires a Command Computer (CC:Tweaked) and Minecraft 1.19.4+.
 --
 -- Regions are stored in the world (command storage), so any command computer
--- can manage them; pocket computers can too, through the regionui app.
+-- can manage them; pocket computers can too, through the control app.
 -- Features that act continuously (boundary, killzone) are enforced by
--- regiond, which must be running on one computer.
+-- controld, which must be running on one computer.
 --
 -- Usage:
 --   region create <name> <x1> <y1> <z1> <x2> <y2> <z2>
@@ -40,6 +40,7 @@ local argparse = require("args")
 local cmd = require("cmd")
 local regions = require("regions")
 local regionops = require("regionops")
+local control = require("control")
 
 if not commands then
   printError("region requires a Command Computer")
@@ -127,7 +128,7 @@ function commandsBySub.add()
   if result.message then print(result.message) end
   print("Added " .. fname .. " to '" .. cmd.sanitize(name) .. "'")
   if result.needsDaemon then
-    print("Note: regiond isn't running, so " .. fname .. " won't be enforced until it is.")
+    print("Note: controld isn't running, so " .. fname .. " won't be enforced until it is.")
   end
 end
 
@@ -175,8 +176,8 @@ function commandsBySub.info()
     end
     print("  " .. fname .. (#parts > 0 and (": " .. table.concat(parts, " ")) or ""))
   end
-  local holder = regions.daemon()
-  print(holder and ("regiond: running on " .. holder) or "regiond: not running")
+  local holder = control.daemon()
+  print(holder and ("controld: running on " .. holder) or "controld: not running")
 end
 
 function commandsBySub.features()

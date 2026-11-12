@@ -24,10 +24,11 @@
 --   default  Value when the option isn't given.
 --   min/max  Bounds for numbers.
 --   pattern  Lua pattern that strings must match (e.g. "^[%w_:]+$").
+--   choices  List of allowed values (strings).
 --   check    Optional function(value) returning an error string if invalid.
 --   arg      Placeholder shown in help for non-booleans (default: <type>).
 --   desc     Help text (command-line help).
---   hint     Longer explanation for UIs (regionui shows it when the field
+--   hint     Longer explanation for UIs (the control app shows it when the field
 --            name is tapped); falls back to desc.
 --
 -- Accepted forms: --name value, --name=value, -x value, -xvalue, -xy (booleans),
@@ -47,6 +48,11 @@ local function convert(opt, label, raw)
       return nil, string.format("%s must be between %s and %s", label,
         tostring(opt.min or "-inf"), tostring(opt.max or "inf"))
     end
+  end
+  if opt.choices then
+    local found = false
+    for _, c in ipairs(opt.choices) do if c == v then found = true end end
+    if not found then return nil, label .. " must be one of: " .. table.concat(opt.choices, ", ") end
   end
   if opt.pattern and not tostring(v):match(opt.pattern) then
     return nil, label .. ": invalid value '" .. tostring(v) .. "'"

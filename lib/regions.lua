@@ -19,16 +19,16 @@
 --                Called once by `region remove`/`region delete` to undo
 --                everything (e.g. release confined players).
 --   queries(region, settings, ctx) -> { command, ... }
---                Called by regiond every tick. Commands to run this tick;
+--                Called by controld every tick. Commands to run this tick;
 --                identical commands from different features/regions run once.
 --   act(region, settings, ctx, results) -> { command, ... }
---                Called by regiond after the queries ran. results[command] is
+--                Called by controld after the queries ran. results[command] is
 --                { ok = bool, out = {lines} } for each query. Returns commands
 --                to run in response (teleports, kills, ...).
 --
 -- ctx.state is a table kept between ticks for this feature and region,
--- ctx.now the current time in seconds, and ctx.log(text) prints to regiond's
--- screen. Features with neither queries nor act don't need regiond at all.
+-- ctx.now the current time in seconds, and ctx.log(text) prints to controld's
+-- screen. Features with neither queries nor act don't need controld at all.
 --
 -- This module also holds helpers features share (exemptions, selectors, ...).
 
@@ -75,7 +75,7 @@ function M.get(name)
   return M.all()[name]
 end
 
--- Mark the store as changed, so regiond reloads it.
+-- Mark the store as changed, so controld reloads it.
 local function bump()
   commands.exec(string.format('data modify storage %s version set value "%d-%d"',
     STORE, os.epoch("utc"), math.random(0, 999999)))
@@ -101,70 +101,6 @@ end
 function M.delete(name)
   commands.exec(string.format('data remove storage %s regions."%s"', STORE, name))
   bump()
-end
-
----------------------------------------------------------------------------
--- regiond lock, so only one computer runs regiond. Stored as
--- "<computer id>|x,y,z|<dimension>|<heartbeat epoch ms>".
-
-local LOCK_STALE_MS = 10000 -- a lock without a heartbeat for this long is abandoned
-
-local function readLock()
-  local _, out = commands.exec("data get storage " .. STORE .. " lock")
-  local s = cmd.parseStoredString(out)
-  if not s then return nil end
-  local id, pos, dim, beat = s:match("^(%d+)|([^|]*)|([^|]*)|(%d+)$")
-  if not id then return nil end
-  return { id = tonumber(id), pos = pos, dim = dim, beat = tonumber(beat) }
-end
-
-local function writeLock()
-  local x, y, z = commands.getBlockPosition()
-  commands.exec(string.format('data modify storage %s lock set value "%d|%d,%d,%d|%s|%d"',
-    STORE, os.getComputerID(), x, y, z, cmd.dimension(), os.epoch("utc")))
-end
-
---- Claim the regiond lock. Returns true, or false and a description of the
--- computer holding it.
-function M.claimLock()
-  local lock = readLock()
-  if lock and lock.id ~= os.getComputerID() then
-    local age = os.epoch("utc") - lock.beat
-    if age < LOCK_STALE_MS then
-      return false, string.format("computer #%d at %s (%s), last seen %ds ago",
-        lock.id, lock.pos, lock.dim, math.floor(age / 1000))
-    end
-  end
-  writeLock()
-  return true
-end
-
---- Refresh the lock's heartbeat. Returns false (and the holder) if another
--- computer has taken it over in the meantime.
-function M.heartbeat()
-  local lock = readLock()
-  if lock and lock.id ~= os.getComputerID() then
-    return false, string.format("computer #%d at %s (%s)", lock.id, lock.pos, lock.dim)
-  end
-  writeLock()
-  return true
-end
-
---- Description of the computer running regiond ("computer #3 at ..."), or nil
--- if it isn't running.
-function M.daemon()
-  local lock = readLock()
-  if lock and os.epoch("utc") - lock.beat < LOCK_STALE_MS then
-    return string.format("computer #%d at %s (%s)", lock.id, lock.pos, lock.dim)
-  end
-end
-
---- Release the lock, if this computer holds it.
-function M.releaseLock()
-  local lock = readLock()
-  if lock and lock.id == os.getComputerID() then
-    commands.exec("data remove storage " .. STORE .. " lock")
-  end
 end
 
 ---------------------------------------------------------------------------
