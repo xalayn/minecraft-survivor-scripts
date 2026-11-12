@@ -138,13 +138,29 @@ local function snbtText()
   return c >= 5
 end
 
-local function run(cmd)
-  local ok, out = commands.exec(cmd)
-  if not ok then
-    printError(cmd)
-    for _, line in ipairs(out or {}) do printError("  " .. line) end
+-- Run commands concurrently and return { ok = bool, out = {lines} } for each,
+-- in order. Unlike commands.exec, which waits a server tick per command, these
+-- can all complete within the same tick.
+local function execAll(cmds)
+  local index, results, pending = {}, {}, 0
+  for i, cmd in ipairs(cmds) do
+    index[commands.execAsync(cmd)] = i
+    pending = pending + 1
   end
-  return ok
+  while pending > 0 do
+    local _, id, taskOk, ok, out = os.pullEvent("task_complete")
+    local i = index[id]
+    if i then
+      index[id] = nil
+      pending = pending - 1
+      if taskOk then
+        results[i] = { ok = ok, out = out or {} }
+      else
+        results[i] = { ok = false, out = { tostring(ok) } } -- task error message
+      end
+    end
+  end
+  return results
 end
 
 -- The computer's dimension, e.g. "minecraft:overworld". There's no command
@@ -226,57 +242,75 @@ local function registryRemove(name)
   commands.exec(string.format('data remove storage %s boxes."%s"', REGISTRY, name))
 end
 
--- Run fn with the given chunks of a dimension loaded. Chunks that weren't
--- already forceloaded are forceloaded for the duration and released
--- afterwards; chunks that something else forceloaded are left alone.
-local function withChunksLoaded(dim, chunks, fn)
-  local added = {}
-  for _, c in ipairs(chunks) do
-    local bx, bz = c[1] * 16, c[2] * 16
-    local ok, out = execIn(dim, string.format("forceload query %d %d", bx, bz))
-    local forced = ok and not (out[1] or ""):find("not marked")
-    if not forced and execIn(dim, string.format("forceload add %d %d", bx, bz)) then
-      added[#added + 1] = c
-    end
-  end
-  if #added > 0 then print(string.format("Loading %d chunk(s)...", #added)) end
-  local ok, err = pcall(fn)
-  for _, c in ipairs(added) do
-    execIn(dim, string.format("forceload remove %d %d", c[1] * 16, c[2] * 16))
-  end
-  if not ok then error(err, 0) end
-end
-
 -- Seconds to wait for forceloaded chunks and their entities. Generous because
 -- far-away chunks may need loading from disk or even generating first.
 local LOAD_TIMEOUT = 30
 
--- Wait until all the chunks of a dimension are loaded. Returns false on timeout.
+-- One command per chunk, from a format taking (dimension, block x, block z).
+local function chunkCmds(dim, chunks, fmt)
+  local cmds = {}
+  for i, c in ipairs(chunks) do cmds[i] = string.format(fmt, dim, c[1] * 16, c[2] * 16) end
+  return cmds
+end
+
+local function allOk(results)
+  for _, r in ipairs(results) do
+    if not r.ok then return false end
+  end
+  return true
+end
+
+-- Wait until all the chunks of a dimension are loaded (`if loaded` also
+-- requires their entities to be loaded). Returns false on timeout.
 local function waitLoaded(dim, chunks)
+  local cmds = chunkCmds(dim, chunks, "execute in %s if loaded %d 0 %d")
   local deadline = os.clock() + LOAD_TIMEOUT
+  local results
   repeat
-    local all = true
-    for _, c in ipairs(chunks) do
-      if not commands.exec(string.format("execute in %s if loaded %d 0 %d", dim, c[1] * 16, c[2] * 16)) then
-        all = false
-        break
-      end
-    end
-    if all then return true end
+    results = execAll(cmds)
+    if allOk(results) then return true end
     sleep(0.1)
   until os.clock() > deadline
 
-  -- Timed out: show what the server says about each chunk, to diagnose.
   printError("Chunks not loaded after " .. LOAD_TIMEOUT .. "s (" .. dim .. "):")
-  for _, c in ipairs(chunks) do
-    local bx, bz = c[1] * 16, c[2] * 16
-    local _, q = commands.exec(string.format("execute in %s run forceload query %d %d", dim, bx, bz))
-    local loaded, l = commands.exec(string.format("execute in %s if loaded %d 0 %d", dim, bx, bz))
-    print(string.format(" %d,%d loaded=%s", bx, bz, tostring(loaded)))
-    print("  query: " .. tostring(q and q[1]))
-    if not loaded then print("  if loaded: " .. tostring(l and l[1])) end
+  for i, c in ipairs(chunks) do
+    if not results[i].ok then
+      print(string.format(" %d,%d: %s", c[1] * 16, c[2] * 16, tostring(results[i].out[1])))
+    end
   end
   return false
+end
+
+-- Run fn(loaded) with the given chunks of a dimension loaded; `loaded` is
+-- false if they didn't load in time. Chunks that are already loaded are left
+-- alone. Unloaded ones are forceloaded for the duration and released
+-- afterwards, unless something else had forceloaded them.
+local function withChunksLoaded(dim, chunks, fn)
+  local unloaded = {}
+  local loadedNow = execAll(chunkCmds(dim, chunks, "execute in %s if loaded %d 0 %d"))
+  for i, c in ipairs(chunks) do
+    if not loadedNow[i].ok then unloaded[#unloaded + 1] = c end
+  end
+
+  local added = {}
+  if #unloaded > 0 then
+    local queries = execAll(chunkCmds(dim, unloaded, "execute in %s run forceload query %d %d"))
+    local toAdd = {}
+    for i, c in ipairs(unloaded) do
+      local forced = queries[i].ok and not (queries[i].out[1] or ""):find("not marked")
+      if not forced then toAdd[#toAdd + 1] = c end
+    end
+    local adds = execAll(chunkCmds(dim, toAdd, "execute in %s run forceload add %d %d"))
+    for i, c in ipairs(toAdd) do
+      if adds[i].ok then added[#added + 1] = c end
+    end
+    print(string.format("Loading %d chunk(s)...", #unloaded))
+  end
+
+  local loaded = #unloaded == 0 or waitLoaded(dim, chunks)
+  local ok, err = pcall(fn, loaded)
+  execAll(chunkCmds(dim, added, "execute in %s run forceload remove %d %d"))
+  if not ok then error(err, 0) end
 end
 
 -- Run a kill command and return how many entities it killed.
@@ -300,10 +334,8 @@ local function killBox(name, entry)
     return kill(selector), true
   end
   local killed, loaded = 0, false
-  withChunksLoaded(entry.dim, entry.chunks, function()
-    killed = killed + kill(selector)
-    if killed >= entry.count then loaded = true return end
-    loaded = waitLoaded(entry.dim, entry.chunks)
+  withChunksLoaded(entry.dim, entry.chunks, function(ok)
+    loaded = ok
     if not loaded then return end
     -- Chunks (and their entities) are loaded; allow a moment for stragglers.
     local deadline = os.clock() + GRACE
@@ -577,16 +609,20 @@ end
 -- Load the chunks (so boxes can be drawn anywhere), summon, and register.
 local failed = 0
 local dim = dimension()
-withChunksLoaded(dim, chunks, function()
-  if not waitLoaded(dim, chunks) then
+withChunksLoaded(dim, chunks, function(loaded)
+  if not loaded then
     -- Summoning into a chunk that isn't loaded can leave entities in limbo
     -- where commands can't reach them, so don't.
     printError("Timed out waiting for chunks to load; box not drawn. Try again.")
     failed = #parts
     return
   end
-  for _, cmd in ipairs(parts) do
-    if not run(cmd) then failed = failed + 1 end
+  for i, r in ipairs(execAll(parts)) do
+    if not r.ok then
+      failed = failed + 1
+      printError(parts[i])
+      for _, line in ipairs(r.out) do printError("  " .. line) end
+    end
   end
 end)
 
