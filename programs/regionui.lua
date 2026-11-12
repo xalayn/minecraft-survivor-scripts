@@ -1,15 +1,19 @@
--- regionui: manage regions from a pocket computer (or any computer), with
--- menus instead of commands. Talks to regiond over a wireless or ender modem,
--- so regiond must be running somewhere with a modem too.
+-- regionui: manage regions from a pocket computer (or any computer), with a
+-- touch interface instead of commands. Talks to regiond over a wireless or
+-- ender modem, so regiond must be running somewhere with a modem too.
+--
+-- Built with Basalt (lib/basalt.lua). Best on an advanced (color, touch)
+-- pocket computer: lists work with arrow keys + Enter too, but dialog buttons
+-- need a tap.
 --
 -- What it does:
 --   - Lists regions, and shows which region(s) you're standing in (updated
---     every couple of seconds); pick a region to see it and its features.
+--     every couple of seconds); tap a region to see it and its features.
 --   - Teleport to a region (to the middle of its floor). A boundary you're
 --     confined by still applies, unless you're exempt (e.g. creative).
 --   - Add, change or remove features. Each feature's settings are shown as a
---     form; the form is built from the feature's options, so new features
---     appear here automatically.
+--     list; it's built from the feature's options, so new features appear
+--     here automatically.
 --   - Create a region by walking: stand at one corner and tap Set, then at
 --     the opposite corner and tap Set. The server looks up where you are, so
 --     no GPS is needed; it just needs to know your player name, which this
@@ -20,18 +24,22 @@
 -- Usage:
 --   regionui
 --
--- Pocket computer needs a wireless or ender modem (craft it with one, or
--- equip it from the inventory). Ender modems work at any distance and across
--- dimensions.
+-- The < in the top left (or Backspace) goes back.
 
 package.path = "/lib/?.lua;" .. package.path
-local tui = require("tui")
+local basalt = require("basalt")
 local rpc = require("rpc")
 
 local APP = "Regions"
 local PLAYER_SETTING = "region.player"
 local STARTUP = "/startup/60-regionui.lua"
 local TIMEOUT = 90 -- seconds; drawing far-away regions can take a while
+
+local W, H = term.getSize()
+local root = basalt.getMainFrame()
+
+---------------------------------------------------------------------------
+-- Helpers.
 
 local function sortedKeys(t)
   local keys = {}
@@ -40,27 +48,160 @@ local function sortedKeys(t)
   return keys
 end
 
--- Call regiond, showing a busy screen. Returns the result (true if there is
--- none), or nil after showing the error.
+local function wrap(text, width)
+  local lines = {}
+  for para in (tostring(text) .. "\n"):gmatch("(.-)\n") do
+    local line = ""
+    for word in para:gmatch("%S+") do
+      if line == "" then line = word
+      elseif #line + 1 + #word <= width then line = line .. " " .. word
+      else lines[#lines + 1] = line; line = word end
+    end
+    lines[#lines + 1] = line
+  end
+  return lines
+end
+
+local function player()
+  return settings.get(PLAYER_SETTING)
+end
+
+local function describe(r)
+  local a = r.area
+  return string.format("%d,%d,%d to %d,%d,%d\n%dx%dx%d in %s",
+    a[1], a[2], a[3], a[4], a[5], a[6],
+    a[4] - a[1] + 1, a[5] - a[2] + 1, a[6] - a[3] + 1, (r.dim:gsub("^minecraft:", "")))
+end
+
+---------------------------------------------------------------------------
+-- Screens. Each screen clears the root frame and builds its elements; work
+-- that talks to the server runs in background tasks so the UI stays live.
+
+-- The current screen. token changes whenever the screen does, so background
+-- tasks can tell they belong to a screen that's gone.
+local screen = { token = 0 }
+
+-- Run fn in the background; errors are shown as a toast.
+local function task(fn)
+  basalt.schedule(function()
+    local ok, err = pcall(fn)
+    if not ok and err ~= "Terminated" and screen.toast then
+      screen.toast:error(tostring(err), 5)
+    end
+  end)
+end
+
+-- Call regiond (inside a task). Shows "Working..." meanwhile. Returns the
+-- result (true if there is none), or nil after showing the error.
 local function call(method, ...)
-  tui.busy(APP, "Talking to the server...")
+  local toast = screen.toast
+  if toast then toast:info("Working...", 0) end
   local ok, result = rpc.call(method, TIMEOUT, ...)
+  if toast then toast:hide() end
   if not ok then
-    tui.message(APP, { "Something went wrong:", "", tostring(result) }, "bad")
+    if screen.toast then screen.toast:error(tostring(result), 5) end
     return nil
   end
   if result == nil then return true end
   return result
 end
 
-local function describe(r)
-  local a = r.area
-  return {
-    string.format("%d,%d,%d to", a[1], a[2], a[3]),
-    string.format("%d,%d,%d", a[4], a[5], a[6]),
-    string.format("%dx%dx%d in %s", a[4] - a[1] + 1, a[5] - a[2] + 1, a[6] - a[3] + 1,
-      (r.dim:gsub("^minecraft:", ""))),
-  }
+-- Clear the root and draw the title bar (with a back button if onBack).
+-- flash: optional { text, kind } toast to show on the new screen.
+local function newScreen(title, onBack, flash)
+  screen.token = screen.token + 1
+  local children = root:getChildren()
+  for i = #children, 1, -1 do
+    local child = children[i]
+    if child.destroy then child:destroy() end
+    if children[i] == child then root:removeChild(child) end
+  end
+  root.background = colors.black
+
+  local x = 1
+  if onBack then
+    root:addButton({ x = 1, y = 1, width = 3, height = 1, text = "<",
+      background = colors.blue, foreground = colors.yellow }):onClick(function() onBack() end)
+    x = 4
+  end
+  root:addLabel({ x = x, y = 1, width = W - x + 1, height = 1, text = " " .. title,
+    background = colors.blue, foreground = colors.white })
+
+  screen.back = onBack
+  screen.dialog = root:addDialog()
+  screen.toast = root:addToast()
+  if flash then screen.toast:show(flash[1], flash[2] or "success", 3) end
+  return screen.token
+end
+
+-- Add wrapped text from row y; returns the label and the next free row.
+local function addText(y, text, color)
+  local lines = wrap(text, W - 2)
+  local label = root:addLabel({ x = 2, y = y, width = W - 2, height = #lines,
+    text = table.concat(lines, "\n"), foreground = color or colors.lightGray })
+  return label, y + #lines
+end
+
+-- Add a list filling the screen from row y, focused for keyboard use.
+-- items: { text, fg, action } where action runs in a background task.
+local function addMenu(y, items, emptyText)
+  local list = root:addList({ x = 1, y = y, width = W, height = H - y + 1,
+    emptyText = emptyText or "" })
+  local function add(item)
+    list:addItem({
+      text = item.text, fg = item.fg,
+      callback = function()
+        if item.action then task(item.action) end
+      end,
+    })
+  end
+  for _, item in ipairs(items or {}) do add(item) end
+  list:focus()
+  return list, add
+end
+
+-- Text prompt dialog. callback(text) runs in a task if confirmed.
+local function prompt(title, message, default, callback, mask)
+  screen.dialog:prompt(title, message, default or "", function(text)
+    if text ~= nil then task(function() callback(text) end) end
+  end)
+  -- Dialog:prompt doesn't expose its input; find it to put the cursor after
+  -- the prefilled text (it starts at the beginning) and to mask passwords.
+  local function find(el)
+    if el.__name == "Input" then return el end
+    for _, c in ipairs(el.getChildren and el:getChildren() or {}) do
+      local found = find(c)
+      if found then return found end
+    end
+  end
+  local input = find(screen.dialog)
+  if input then
+    input:_moveCursor(#input.text + 1)
+    if mask then input.replaceChar = mask end
+  end
+end
+
+local function confirm(title, message, callback)
+  screen.dialog:confirm(title, message, function(yes)
+    if yes then task(callback) end
+  end)
+end
+
+-- Forward declarations.
+local mainScreen, regionScreen, featureForm, settingsScreen
+
+---------------------------------------------------------------------------
+-- Feature settings.
+
+local function showValue(v)
+  if v == true then return "on" end
+  if v == false then return "off" end
+  if v == nil then return "-" end
+  return tostring(v)
+end
+
+local function optionLabel(o)
+  return (o.name:gsub("-", " "))
 end
 
 local featureCache
@@ -74,46 +215,12 @@ local function features()
   return featureCache
 end
 
----------------------------------------------------------------------------
--- Feature settings form.
+-- The settings of one feature on a region. current: its settings if it's
+-- already added.
+function featureForm(regionName, info, current)
+  local title = regionName .. ": " .. info.name
+  newScreen(title, function() task(function() regionScreen(regionName) end) end)
 
-local function showValue(v)
-  if v == true then return "on" end
-  if v == false then return "off" end
-  if v == nil then return "-" end
-  return tostring(v)
-end
-
-local function optionLabel(o)
-  return (o.name:gsub("-", " "))
-end
-
--- Edit one option. Returns the new value (or the old one if unchanged).
-local function editOption(title, o, value)
-  if (o.type or "boolean") == "boolean" then return not value end
-  local info = { o.desc or optionLabel(o) }
-  if o.min or o.max then
-    info[#info + 1] = string.format("(%s to %s)", tostring(o.min or "any"), tostring(o.max or "any"))
-  end
-  if o.default == nil then info[#info + 1] = "Enter - to clear." end
-  local text = tui.prompt(title, info, value ~= nil and tostring(value) or nil)
-  if text == nil then return value end
-  if text == "-" and o.default == nil then return nil end
-  if o.type == "number" then
-    local n = tonumber(text)
-    if not n then
-      tui.message(title, { "'" .. text .. "' isn't a number." }, "bad")
-      return value
-    end
-    return n
-  end
-  return text
-end
-
--- Show the form for a feature on a region. current: its settings if already
--- added. Returns when done.
-local function featureForm(region, info, current)
-  local title = region .. ": " .. info.name
   local values = {}
   for _, o in ipairs(info.options) do
     local v = current and current[o.name]
@@ -121,286 +228,295 @@ local function featureForm(region, info, current)
     if v == nil and (o.type or "boolean") == "boolean" then v = false end
     values[o.name] = v
   end
-  local sel = 1
-  while true do
-    local items = {}
-    for i, o in ipairs(info.options) do
-      items[#items + 1] = { label = optionLabel(o) .. ": " .. showValue(values[o.name]), value = i }
-    end
-    items[#items + 1] = { label = current and "Save changes" or ("Add " .. info.name),
-      value = "save", color = tui.color("good") }
-    if current then
-      items[#items + 1] = { label = "Remove " .. info.name, value = "remove", color = tui.color("bad") }
-    end
-    items[#items + 1] = { label = "< Back", value = "back" }
 
-    local choice = tui.menu(title, items, {
-      info = { info.description or info.name, #info.options > 0 and "Tap a setting to change it." or nil },
-      selected = sel,
-    })
-    if choice == nil or choice == "back" then return end
+  local _, y = addText(3, (info.description or info.name) ..
+    (#info.options > 0 and "\nTap a setting to change it." or ""))
+  local list = addMenu(y + 1)
 
-    if choice == "save" then
-      local result = call("setFeature", region, info.name, values)
-      if result then
-        local lines = { (current and "Saved " or "Added ") .. info.name .. "." }
-        if type(result) == "table" and result.message then lines[#lines + 1] = result.message end
-        if type(result) == "table" and result.needsDaemon then
-          lines[#lines + 1] = "Note: regiond isn't enforcing regions right now."
-        end
-        tui.message(title, lines, "good")
-        return
-      end
-    elseif choice == "remove" then
-      if tui.confirm(title, "Remove " .. info.name .. " from " .. region .. "?", "Remove") then
-        if call("removeFeature", region, info.name) then
-          tui.message(title, { "Removed " .. info.name .. "." }, "good")
+  local function rowText(o)
+    return optionLabel(o) .. ": " .. showValue(values[o.name])
+  end
+
+  for i, o in ipairs(info.options) do
+    list:addItem({
+      text = rowText(o),
+      callback = function(_, entry)
+        if (o.type or "boolean") == "boolean" then
+          values[o.name] = not values[o.name]
+          entry:setText(rowText(o))
           return
         end
-      end
-    else
-      sel = choice
-      local o = info.options[choice]
-      values[o.name] = editOption(title, o, values[o.name])
-    end
+        local message = o.desc or optionLabel(o)
+        if o.min or o.max then
+          message = message .. string.format(" (%s to %s)", tostring(o.min or "any"), tostring(o.max or "any"))
+        end
+        if o.default == nil then message = message .. ". Empty to clear." end
+        prompt(optionLabel(o), message, values[o.name] ~= nil and tostring(values[o.name]) or "", function(text)
+          if text == "" and o.default == nil then
+            values[o.name] = nil
+          elseif text == "" then
+            return
+          elseif o.type == "number" then
+            local n = tonumber(text)
+            if not n then
+              screen.toast:error("'" .. text .. "' isn't a number.", 4)
+              return
+            end
+            values[o.name] = n
+          else
+            values[o.name] = text
+          end
+          entry:setText(rowText(o))
+        end)
+      end,
+    })
   end
+
+  list:addItem({
+    text = current and "Save changes" or ("Add " .. info.name), fg = colors.lime,
+    callback = function()
+      task(function()
+        local result = call("setFeature", regionName, info.name, values)
+        if not result then return end
+        local text = (current and "Saved " or "Added ") .. info.name
+        if type(result) == "table" and result.needsDaemon then
+          regionScreen(regionName, { text .. ", but regiond isn't running.", "warning" })
+        else
+          regionScreen(regionName, { text .. ".", "success" })
+        end
+      end)
+    end,
+  })
+  if current then
+    list:addItem({
+      text = "Remove " .. info.name, fg = colors.red,
+      callback = function()
+        confirm(title, "Remove " .. info.name .. " from " .. regionName .. "?", function()
+          if call("removeFeature", regionName, info.name) then
+            regionScreen(regionName, { "Removed " .. info.name .. ".", "success" })
+          end
+        end)
+      end,
+    })
+  end
+end
+
+-- Pick a feature to add to a region.
+local function featurePicker(r, all)
+  newScreen(r.name .. ": add", function() task(function() regionScreen(r.name) end) end)
+  local names = {}
+  for _, fname in ipairs(sortedKeys(all)) do
+    if not r.features[fname] then names[#names + 1] = fname end
+  end
+  local desc, y = addText(3, "Pick a feature.\n ")
+  local items = {}
+  for _, fname in ipairs(names) do
+    items[#items + 1] = { text = fname, action = function() featureForm(r.name, all[fname], nil) end }
+  end
+  local list = addMenu(y + 1, items, "All features are added.")
+  -- Show the description of the highlighted feature.
+  list:onSelect(function(_, index)
+    local f = all[names[index]]
+    if f then desc.text = table.concat(wrap(f.name .. ": " .. (f.description or ""), W - 2), "\n") end
+  end)
 end
 
 ---------------------------------------------------------------------------
 -- Region screen.
 
-local function regionScreen(name)
-  while true do
-    local r = call("get", name)
-    if not r then return end
-    local all = features()
-    if not all then return end
+function regionScreen(name, flash)
+  local token = newScreen(name, function() task(mainScreen) end, flash)
+  local loading = addText(3, "Loading...")
+  local r = call("get", name)
+  local all = r and features()
+  if screen.token ~= token then return end
+  if not r or not all then return end
+  loading.text = ""
 
-    local items = {}
-    for _, fname in ipairs(sortedKeys(r.features)) do
-      items[#items + 1] = { label = "* " .. fname, value = { edit = fname } }
-    end
-    items[#items + 1] = { label = "+ Add feature", value = "add", color = tui.color("accent") }
-    items[#items + 1] = { label = "Teleport here", value = "teleport" }
-    items[#items + 1] = { label = "Delete region", value = "delete", color = tui.color("bad") }
-    items[#items + 1] = { label = "< Back", value = "back" }
-
-    local choice = tui.menu(r.name, items, { info = describe(r) })
-    if choice == nil or choice == "back" then return end
-
-    if choice == "add" then
-      local options, descriptions = {}, {}
-      for _, fname in ipairs(sortedKeys(all)) do
-        if not r.features[fname] then
-          options[#options + 1] = { label = fname, value = fname }
-          descriptions[#descriptions + 1] = fname .. ": " .. (all[fname].description or "")
-        end
-      end
-      if #options == 0 then
-        tui.message(r.name, { "All features are already added." })
-      else
-        options[#options + 1] = { label = "< Back", value = "back" }
-        local fname = tui.menu(r.name .. ": add", options, { info = descriptions })
-        if fname and fname ~= "back" then featureForm(r.name, all[fname], nil) end
-      end
-    elseif choice == "teleport" then
-      local dest = call("teleport", settings.get(PLAYER_SETTING), r.name)
-      if dest then
-        tui.message(r.name, {
-          "Teleported to the middle of " .. r.name .. "'s floor:",
-          string.format("%.1f, %d, %.1f", dest[1], dest[2], dest[3]),
-        }, "good")
-      end
-    elseif choice == "delete" then
-      if tui.confirm(r.name, { "Delete region " .. r.name .. "?", "Its features are removed too." }, "Delete") then
-        if call("delete", r.name) then
-          tui.message(APP, { "Deleted " .. r.name .. "." }, "good")
-          return
-        end
-      end
-    elseif type(choice) == "table" then
-      local info = all[choice.edit]
-      if info then
-        featureForm(r.name, info, r.features[choice.edit])
-      else
-        tui.message(r.name, { "Unknown feature: " .. choice.edit }, "bad")
-      end
-    end
+  local _, y = addText(3, describe(r))
+  local items = {}
+  for _, fname in ipairs(sortedKeys(r.features)) do
+    items[#items + 1] = { text = "* " .. fname, action = function()
+      if all[fname] then featureForm(r.name, all[fname], r.features[fname])
+      else screen.toast:error("Unknown feature: " .. fname, 4) end
+    end }
   end
+  items[#items + 1] = { text = "+ Add feature", fg = colors.yellow, action = function()
+    featurePicker(r, all)
+  end }
+  items[#items + 1] = { text = "Teleport here", action = function()
+    local dest = call("teleport", player(), r.name)
+    if dest then
+      screen.toast:success(string.format("Teleported to %.1f, %d, %.1f", dest[1], dest[2], dest[3]), 3)
+    end
+  end }
+  items[#items + 1] = { text = "Delete region", fg = colors.red, action = function()
+    confirm(r.name, "Delete region " .. r.name .. "? Its features are removed too.", function()
+      if call("delete", r.name) then mainScreen({ "Deleted " .. r.name .. ".", "success" }) end
+    end)
+  end }
+  addMenu(y + 1, items)
 end
 
 ---------------------------------------------------------------------------
--- New region wizard.
+-- New region: walk to two corners.
 
--- Ask the player to stand at a corner. Returns { x, y, z, dim } or nil.
-local function setCorner(title, which, first)
-  local player = settings.get(PLAYER_SETTING)
-  while true do
-    local info = { "Stand at the " .. which .. " corner of the region, then choose Set." }
-    if first then
-      info[#info + 1] = string.format("First corner: %d,%d,%d", first[1], first[2], first[3])
-    end
-    local choice = tui.menu(title, {
-      { label = "Set " .. which .. " corner", value = "set", color = tui.color("good") },
-      { label = "Cancel", value = "cancel" },
-    }, { info = info })
-    if choice ~= "set" then return nil end
-    local pos = call("playerPos", player)
-    if pos then return pos end
-  end
+local function cornerScreen(name, first)
+  local which = first and "second" or "first"
+  newScreen("New: " .. name, function() task(mainScreen) end)
+  local text = "Stand at the " .. which .. " corner of the region, then tap Set."
+  if first then text = text .. string.format("\nFirst corner: %d,%d,%d", first[1], first[2], first[3]) end
+  local _, y = addText(3, text, colors.white)
+  addMenu(y + 1, {
+    { text = "Set " .. which .. " corner", fg = colors.lime, action = function()
+      local pos = call("playerPos", player())
+      if not pos then return end
+      if not first then return cornerScreen(name, pos) end
+      if pos.dim ~= first.dim then
+        screen.toast:error("Both corners must be in the same dimension.", 4)
+        return
+      end
+      local preview = { dim = pos.dim, area = {
+        math.min(first[1], pos[1]), math.min(first[2], pos[2]), math.min(first[3], pos[3]),
+        math.max(first[1], pos[1]), math.max(first[2], pos[2]), math.max(first[3], pos[3]),
+      } }
+      confirm("New: " .. name, "Create " .. name .. "? " .. describe(preview):gsub("\n", ", "), function()
+        local r = call("create", name, { first[1], first[2], first[3] }, { pos[1], pos[2], pos[3] }, pos.dim)
+        if r then regionScreen(r.name, { "Created " .. r.name .. ".", "success" }) end
+      end)
+    end },
+    { text = "Cancel", action = function() mainScreen() end },
+  })
 end
 
 local function newRegion()
-  local name = tui.prompt("New region", { "Name for the new region:", "(letters, numbers, - and _)" })
-  if not name or name == "" then return end
-  local title = "New: " .. name
-  local p1 = setCorner(title, "first")
-  if not p1 then return end
-  local p2 = setCorner(title, "second", p1)
-  if not p2 then return end
-  if p1.dim ~= p2.dim then
-    tui.message(title, { "Both corners must be in the same dimension." }, "bad")
-    return
-  end
-  local preview = {
-    name = name, dim = p1.dim,
-    area = {
-      math.min(p1[1], p2[1]), math.min(p1[2], p2[2]), math.min(p1[3], p2[3]),
-      math.max(p1[1], p2[1]), math.max(p1[2], p2[2]), math.max(p1[3], p2[3]),
-    },
-  }
-  local info = describe(preview)
-  table.insert(info, 1, "Create this region?")
-  if not tui.confirm(title, info, "Create") then return end
-  local r = call("create", name, { p1[1], p1[2], p1[3] }, { p2[1], p2[2], p2[3] }, p1.dim)
-  if r then regionScreen(r.name) end
+  prompt("New region", "Name for the new region (letters, numbers, - and _):", "", function(name)
+    if name ~= "" then cornerScreen(name, nil) end
+  end)
 end
 
 ---------------------------------------------------------------------------
 -- Settings.
 
-local function askPlayer()
-  while true do
-    local name = tui.prompt("Your player name", {
-      "What's your Minecraft player name?",
-      "It's used to find where you are when setting corners.",
-    }, settings.get(PLAYER_SETTING))
-    if name and name:match("^[%w_]+$") then
-      settings.set(PLAYER_SETTING, name)
-      settings.save()
-      return name
-    end
-    tui.message("Your player name", { "That doesn't look like a player name." }, "bad")
+local function setPlayer(name, after)
+  if not name:match("^[%w_]+$") then
+    screen.toast:error("That doesn't look like a player name.", 4)
+    return false
   end
+  settings.set(PLAYER_SETTING, name)
+  settings.save()
+  if after then after() end
+  return true
 end
 
-local function settingsScreen()
-  local sel = 1
-  while true do
-    local hasSecret = (settings.get(rpc.SECRET_SETTING) or "") ~= ""
-    local onBoot = fs.exists(STARTUP)
-    local choice = tui.menu("Settings", {
-      { label = "Player: " .. tostring(settings.get(PLAYER_SETTING)), value = 1 },
-      { label = "Password: " .. (hasSecret and "set" or "none"), value = 2 },
-      { label = "Open on startup: " .. (onBoot and "on" or "off"), value = 3 },
-      { label = "< Back", value = "back" },
-    }, { selected = sel })
-    if choice == nil or choice == "back" then return end
-    sel = choice
-    if choice == 1 then
-      askPlayer()
-    elseif choice == 2 then
-      local secret = tui.prompt("Password", {
-        "Only needed if the server has a password (region.secret).",
-        "Leave empty to keep it, - to remove it.",
-      }, nil, { mask = "*" })
-      if secret == "-" then settings.unset(rpc.SECRET_SETTING)
-      elseif secret and secret ~= "" then settings.set(rpc.SECRET_SETTING, secret) end
+function settingsScreen()
+  newScreen("Settings", function() task(mainScreen) end)
+  local list = addMenu(3)
+  local function playerText() return "Player: " .. tostring(player()) end
+  local function passwordText()
+    return "Password: " .. (((settings.get(rpc.SECRET_SETTING) or "") ~= "") and "set" or "none")
+  end
+  local function bootText() return "Open on startup: " .. (fs.exists(STARTUP) and "on" or "off") end
+
+  list:addItem({ text = playerText(), callback = function(_, entry)
+    prompt("Player", "Your Minecraft player name:", player(), function(name)
+      setPlayer(name, function() entry:setText(playerText()) end)
+    end)
+  end })
+  list:addItem({ text = passwordText(), callback = function(_, entry)
+    prompt("Password", "Only needed if the server has one (region.secret). Empty removes it.", "", function(secret)
+      if secret == "" then settings.unset(rpc.SECRET_SETTING) else settings.set(rpc.SECRET_SETTING, secret) end
       settings.save()
-    elseif choice == 3 then
-      if onBoot then
-        fs.delete(STARTUP)
-      else
-        local f = fs.open(STARTUP, "w")
-        f.write('shell.run("/bin/regionui")\n')
-        f.close()
-      end
+      entry:setText(passwordText())
+    end, "*")
+  end })
+  list:addItem({ text = bootText(), callback = function(_, entry)
+    if fs.exists(STARTUP) then
+      fs.delete(STARTUP)
+    else
+      local f = fs.open(STARTUP, "w")
+      f.write('shell.run("/bin/regionui")\n')
+      f.close()
     end
+    entry:setText(bootText())
+  end })
+end
+
+---------------------------------------------------------------------------
+-- Main screen.
+
+function mainScreen(flash)
+  local token = newScreen(APP, nil, flash)
+  local here = addText(3, "Locating you...")
+  local list, add = addMenu(5, {}, "Loading...")
+
+  local all = call("list")
+  if screen.token ~= token then return end
+  for _, name in ipairs(sortedKeys(all)) do
+    local feats = sortedKeys(all[name].features)
+    add({ text = name .. (#feats > 0 and (" (" .. table.concat(feats, ", ") .. ")") or ""),
+      action = function() regionScreen(name) end })
+  end
+  if all then
+    add({ text = "+ New region", fg = colors.yellow, action = newRegion })
+  else
+    add({ text = "Try again", action = function() mainScreen() end })
+  end
+  add({ text = "Settings", action = function() settingsScreen() end })
+  add({ text = "Quit", action = function() basalt.stop() end })
+  list.emptyText = ""
+
+  -- Keep "You're in" up to date while this screen is shown.
+  while screen.token == token do
+    local ok, names = rpc.call("regionsAt", 5, player())
+    if screen.token ~= token then return end
+    if not ok then
+      here.text = "Your location: unknown"
+    elseif #names == 0 then
+      here.text = "You're not in a region."
+    else
+      here.text = ("You're in: " .. table.concat(names, ", ")):sub(1, W - 2)
+    end
+    sleep(2)
   end
 end
 
 ---------------------------------------------------------------------------
--- Main menu.
+-- Start.
 
-local function main()
-  local _, modemErr = rpc.openModem()
-  if modemErr then
-    tui.message(APP, { modemErr }, "bad")
-    return
-  end
-  if not settings.get(PLAYER_SETTING) then askPlayer() end
-
-  -- Regions, and the ones the player is in. Refreshed every few seconds
-  -- (quietly: no busy screen, errors only shown as "location unknown").
-  local all, here
-  local function refresh(quiet)
-    if quiet then
-      local ok, result = rpc.call("list", 5)
-      if ok then all = result end
-    else
-      all = call("list")
-    end
-    local ok, names = rpc.call("regionsAt", 5, settings.get(PLAYER_SETTING))
-    here = ok and names or nil
-  end
-
-  refresh(false)
-  local sel = 1
+-- Backspace goes back (unless typing in a text field or a dialog is open).
+basalt.schedule(function()
   while true do
-    local items = {}
-    if all then
-      for _, name in ipairs(sortedKeys(all)) do
-        local feats = sortedKeys(all[name].features)
-        items[#items + 1] = {
-          label = name .. (#feats > 0 and (" (" .. table.concat(feats, ", ") .. ")") or ""),
-          value = { region = name },
-        }
-      end
-      items[#items + 1] = { label = "+ New region", value = "new", color = tui.color("accent") }
-    else
-      items[#items + 1] = { label = "Try again", value = "retry" }
-    end
-    items[#items + 1] = { label = "Settings", value = "settings" }
-    items[#items + 1] = { label = "Quit", value = "quit" }
-
-    local info = {}
-    if not here then
-      info[1] = "Your location: unknown"
-    elseif #here == 0 then
-      info[1] = "You're not in a region."
-    else
-      info[1] = "You're in: " .. table.concat(here, ", ")
-    end
-    if all and next(all) == nil then info[#info + 1] = "No regions yet." end
-
-    local choice
-    choice, sel = tui.menu(APP, items, { info = info, selected = sel, refresh = 2 })
-    if choice == tui.REFRESH then
-      refresh(true)
-    else
-      if choice == nil or choice == "quit" then return end
-      if choice == "new" then newRegion()
-      elseif choice == "settings" then settingsScreen()
-      elseif type(choice) == "table" then regionScreen(choice.region)
-      end
-      refresh(false)
+    local _, key = os.pullEvent("key")
+    local focused = root:getFocused()
+    local typing = focused and focused.__name == "Input"
+    if key == keys.backspace and screen.back and not typing
+        and not (screen.dialog and screen.dialog.visible) then
+      screen.back()
     end
   end
+end)
+
+local _, modemErr = rpc.openModem()
+if modemErr then
+  newScreen(APP)
+  addText(3, modemErr, colors.red)
+  addMenu(6, { { text = "Quit", action = function() basalt.stop() end } })
+elseif not player() then
+  newScreen("Welcome")
+  addText(3, "Your Minecraft player name is used to find where you are when setting corners.", colors.white)
+  local function ask()
+    prompt("Player", "Your Minecraft player name:", "", function(name)
+      if setPlayer(name) then mainScreen() else ask() end
+    end)
+  end
+  ask()
+else
+  task(mainScreen)
 end
 
-local ok, err = pcall(main)
+basalt.run()
 term.setBackgroundColor(colors.black)
 term.setTextColor(colors.white)
 term.clear()
 term.setCursorPos(1, 1)
-if not ok and err ~= "Terminated" then printError(err) end
