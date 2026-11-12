@@ -25,7 +25,7 @@ return {
     { name = "interval", type = "number", default = 1, min = 0.05, arg = "<seconds>",
       desc = "Time between damage" },
     { name = "damage-type", type = "string", default = "minecraft:magic", arg = "<id>",
-      desc = "Damage type (magic ignores armor)" },
+      desc = "Damage type (magic ignores armor)", pattern = "^[%w_%-%.:/]+$" },
     regions.exemptOptions()[1],
     regions.exemptOptions()[2],
   },

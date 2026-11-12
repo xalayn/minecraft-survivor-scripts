@@ -9,6 +9,10 @@
 -- Picks up region changes made with the region program within a second.
 -- Stop with Ctrl+T.
 --
+-- With a wireless or ender modem attached, it also serves pocket computers
+-- running regionui. To require a password from them, run
+-- `set region.secret <password>` here and set the same on each pocket.
+--
 -- Usage:
 --   regiond             Run in this shell.
 --   regiond enable      Start automatically when this computer boots (in its
@@ -18,6 +22,8 @@
 package.path = "/lib/?.lua;" .. package.path
 local regions = require("regions")
 local cmd = require("cmd")
+local rpc = require("rpc")
+local regionops = require("regionops")
 
 if not commands then
   printError("regiond requires a Command Computer")
@@ -163,8 +169,35 @@ local function run()
   end
 end
 
+-- Requests from pocket computers (see lib/rpc.lua).
+local HANDLERS = {
+  list = regionops.list,
+  get = regionops.get,
+  create = regionops.create,
+  setFeature = regionops.setFeature,
+  removeFeature = regionops.removeFeature,
+  delete = regionops.delete,
+  features = regionops.features,
+  playerPos = regionops.playerPos,
+  status = regionops.status,
+}
+
 log("regiond started on computer #" .. os.getComputerID() .. ". Ctrl+T to stop.")
-local okRun, err = pcall(run)
+local modem = rpc.openModem()
+if modem then
+  log("Serving pocket computers via modem '" .. modem .. "'" ..
+    (settings.get(rpc.SECRET_SETTING) and " (password required)" or ""))
+else
+  log("No modem attached: pocket computers can't connect.")
+end
+
+local okRun, err = pcall(function()
+  if modem then
+    parallel.waitForAny(run, function() rpc.serve(HANDLERS, log) end)
+  else
+    run()
+  end
+end)
 regions.releaseLock()
 if okRun or err == "Terminated" then
   log("regiond stopped.")

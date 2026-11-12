@@ -2,8 +2,9 @@
 -- Requires a Command Computer (CC:Tweaked) and Minecraft 1.19.4+.
 --
 -- Regions are stored in the world (command storage), so any command computer
--- can manage them. Features that act continuously (boundary, killzone) are
--- enforced by regiond, which must be running on one computer.
+-- can manage them; pocket computers can too, through the regionui app.
+-- Features that act continuously (boundary, killzone) are enforced by
+-- regiond, which must be running on one computer.
 --
 -- Usage:
 --   region create <name> <x1> <y1> <z1> <x2> <y2> <z2>
@@ -38,6 +39,7 @@ package.path = "/lib/?.lua;" .. package.path
 local argparse = require("args")
 local cmd = require("cmd")
 local regions = require("regions")
+local regionops = require("regionops")
 
 if not commands then
   printError("region requires a Command Computer")
@@ -93,35 +95,21 @@ local function confirm(question)
   return answer == "y" or answer == "yes"
 end
 
-local function disableFeature(r, name)
-  local f = regions.feature(name)
-  if f and f.disable then
-    local ok, err = pcall(f.disable, r, r.features[name] or {})
-    if not ok then printError(name .. ": " .. tostring(err)) end
-  end
-end
-
 local commandsBySub = {}
 
 function commandsBySub.create()
-  local name = raw[2] and cmd.sanitize(raw[2])
+  local name = raw[2]
   if not name then return usage() end
   local area, err = cmd.parseArea(raw, 3)
   if not area then return printError(err) end
-  if regions.get(name) then
-    return printError("Region '" .. name .. "' already exists")
-  end
-  local r = { name = name, dim = cmd.dimension(), area = area, features = {} }
-  local ok, saveErr = regions.save(r)
-  if not ok then return printError("Couldn't save: " .. tostring(saveErr)) end
-  print("Created region '" .. name .. "': " .. describeArea(r))
+  local ok, r = regionops.create(name, { area[1], area[2], area[3] }, { area[4], area[5], area[6] })
+  if not ok then return printError(r) end
+  print("Created region '" .. r.name .. "': " .. describeArea(r))
 end
 
 function commandsBySub.add()
-  local r = getRegion(raw[2])
-  if not r then return end
-  local fname = raw[3]
-  if not fname then return printError("Usage: region add <name> <feature> [options]") end
+  local name, fname = raw[2], raw[3]
+  if not name or not fname then return printError("Usage: region add <name> <feature> [options]") end
   local f, ferr = regions.feature(fname)
   if not f then return printError(ferr) end
 
@@ -134,41 +122,21 @@ function commandsBySub.add()
   end
   if #pos > 0 then return printError("Unexpected argument: " .. pos[1]) end
 
-  if r.features[fname] then disableFeature(r, fname) end
-  if f.enable then
-    local ok, msg = f.enable(r, settings)
-    if not ok then
-      -- Don't record a feature whose setup failed.
-      r.features[fname] = nil
-      regions.save(r)
-      return printError(fname .. ": " .. tostring(msg))
-    end
-    if msg then print(msg) end
-  end
-  r.features[fname] = settings
-  regions.save(r)
-  print("Added " .. fname .. " to '" .. r.name .. "'")
-
-  if f.queries or f.act then
-    local holder = regions.daemon()
-    if not holder then
-      print("Note: regiond isn't running, so " .. fname .. " won't be enforced until it is.")
-    end
+  local ok, result = regionops.setFeature(name, fname, settings)
+  if not ok then return printError(result) end
+  if result.message then print(result.message) end
+  print("Added " .. fname .. " to '" .. cmd.sanitize(name) .. "'")
+  if result.needsDaemon then
+    print("Note: regiond isn't running, so " .. fname .. " won't be enforced until it is.")
   end
 end
 
 function commandsBySub.remove()
-  local r = getRegion(raw[2])
-  if not r then return end
-  local fname = raw[3]
-  if not fname then return printError("Usage: region remove <name> <feature>") end
-  if not r.features[fname] then
-    return printError("'" .. r.name .. "' has no " .. fname .. " feature")
-  end
-  disableFeature(r, fname)
-  r.features[fname] = nil
-  regions.save(r)
-  print("Removed " .. fname .. " from '" .. r.name .. "'")
+  local name, fname = raw[2], raw[3]
+  if not name or not fname then return printError("Usage: region remove <name> <feature>") end
+  local ok, err = regionops.removeFeature(name, fname)
+  if not ok then return printError(err) end
+  print("Removed " .. fname .. " from '" .. cmd.sanitize(name) .. "'")
 end
 
 function commandsBySub.delete()
@@ -179,13 +147,13 @@ function commandsBySub.delete()
   if not opts.yes and not confirm("Delete region '" .. r.name .. "' and all its features?") then
     return print("Cancelled.")
   end
-  for _, fname in ipairs(sortedKeys(r.features)) do disableFeature(r, fname) end
-  regions.delete(r.name)
+  local ok, err = regionops.delete(r.name)
+  if not ok then return printError(err) end
   print("Deleted region '" .. r.name .. "'")
 end
 
 function commandsBySub.list()
-  local all = regions.all()
+  local _, all = regionops.list()
   local names = sortedKeys(all)
   if #names == 0 then return print("No regions.") end
   for _, name in ipairs(names) do
@@ -219,9 +187,9 @@ function commandsBySub.features()
     for _, line in ipairs(argparse.help(f.options or {})) do print(line) end
     return
   end
-  for _, name in ipairs(regions.featureNames()) do
-    local f = regions.feature(name)
-    print(string.format("%-9s %s", name, f and f.description or "(failed to load)"))
+  local _, list = regionops.features()
+  for _, f in ipairs(list) do
+    print(string.format("%-9s %s", f.name, f.description or ""))
   end
 end
 

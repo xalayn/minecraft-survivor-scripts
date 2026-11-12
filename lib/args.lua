@@ -23,6 +23,7 @@
 --   short    Optional single letter, used as -x. Booleans can be combined: -xy.
 --   default  Value when the option isn't given.
 --   min/max  Bounds for numbers.
+--   pattern  Lua pattern that strings must match (e.g. "^[%w_:]+$").
 --   check    Optional function(value) returning an error string if invalid.
 --   arg      Placeholder shown in help for non-booleans (default: <type>).
 --   desc     Help text.
@@ -45,11 +46,40 @@ local function convert(opt, label, raw)
         tostring(opt.min or "-inf"), tostring(opt.max or "inf"))
     end
   end
+  if opt.pattern and not tostring(v):match(opt.pattern) then
+    return nil, label .. ": invalid value '" .. tostring(v) .. "'"
+  end
   if opt.check then
     local err = opt.check(v)
     if err then return nil, label .. ": " .. err end
   end
   return v
+end
+
+--- Validate a table of option values (e.g. received over the network)
+-- against an options list: converts and checks each value like parse()
+-- does, fills in defaults, and rejects unknown keys.
+-- @return the validated table, or nil and an error message.
+function M.validate(options, values)
+  local byName, result = {}, {}
+  for _, o in ipairs(options) do byName[o.name] = o end
+  for k in pairs(values or {}) do
+    if not byName[k] then return nil, "Unknown option: " .. tostring(k) end
+  end
+  for _, o in ipairs(options) do
+    local v = (values or {})[o.name]
+    if v == nil then
+      result[o.name] = o.default
+    elseif (o.type or "boolean") == "boolean" then
+      if type(v) ~= "boolean" then return nil, o.name .. " must be true or false" end
+      result[o.name] = v
+    else
+      local converted, err = convert(o, o.name, tostring(v))
+      if err then return nil, err end
+      result[o.name] = converted
+    end
+  end
+  return result
 end
 
 --- Parse argv against an options list.

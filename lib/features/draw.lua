@@ -11,7 +11,8 @@ return {
   description = "Show the region as a box",
 
   options = {
-    { name = "block", type = "string", default = boxdraw.DEFAULT_BLOCK, arg = "<block>", desc = "Edge block" },
+    { name = "block", type = "string", default = boxdraw.DEFAULT_BLOCK, arg = "<block>", desc = "Edge block",
+      pattern = "^[%w_%-%.:/]+$" },
     { name = "walls", default = true, desc = "No walls" },
     { name = "opacity", type = "number", default = boxdraw.DEFAULT_OPACITY, min = 0, max = 100,
       arg = "<0-100>", desc = "Wall opacity %" },
