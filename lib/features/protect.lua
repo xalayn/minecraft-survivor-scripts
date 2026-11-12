@@ -84,15 +84,26 @@ return {
       else
         local name = "cc_" .. region.name .. "_" .. i
         local base = string.format("yawp local %s %s ", region.dim, name)
-        local cmds = { string.format("yawp dim %s create local %s %s", region.dim, name, a) }
+        -- Create it, and check it really was: YAWP may answer "success" while
+        -- only printing why it refused.
+        local createCmd = string.format("yawp dim %s create local %s %s", region.dim, name, a)
+        local cok, cout = commands.exec(createCmd)
+        local reply = table.concat(cout or {}, " ")
+        if not cok or not reply:lower():find("created") then
+          cleanup(region)
+          return false, string.format("YAWP didn't create %s: %s (%s)", name,
+            reply ~= "" and reply or "no reply", createCmd)
+        end
+        names[#names + 1] = name
+        remember(region, names)
+
+        local cmds = {}
         if #s.flags > 0 then cmds[#cmds + 1] = base .. "add flags " .. table.concat(s.flags, " ") end
         if s.priority then cmds[#cmds + 1] = base .. "state priority " .. math.floor(s.priority) end
         if not s.alerts then cmds[#cmds + 1] = base .. "state alert false" end
         for _, p in ipairs(s.members) do cmds[#cmds + 1] = base .. "add player member " .. p end
-        names[#names + 1] = name
         local ok, err = yawp.run(cmds)
         if not ok then
-          remember(region, names)
           cleanup(region)
           return false, "YAWP: " .. err
         end
