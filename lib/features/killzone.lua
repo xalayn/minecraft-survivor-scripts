@@ -3,13 +3,13 @@
 -- With no options, any non-exempt player whose feet are inside is killed
 -- immediately. --delay gives a warning countdown (on the action bar) first, so
 -- players can get out. --damage deals that much damage every --interval
--- seconds instead of killing.
+-- seconds instead of killing. --players limits it to players matching a rule
+-- (see lib/predicate.lua), e.g. --players "team:blue and not tag:referee".
 --
 -- Exempt players: creative and spectator players (unless turned off), and
 -- anyone with the ccregion_exempt tag.
 
 local regions = require("regions")
-local cmd = require("cmd")
 
 local function warn(player, text)
   return string.format('title %s actionbar {"text":"%s","color":"red"}', player, text)
@@ -30,19 +30,20 @@ return {
     { name = "damage-type", type = "string", default = "minecraft:magic", arg = "<id>",
       desc = "Damage type (magic ignores armor)", pattern = "^[%w_%-%.:/]+$",
       hint = "Minecraft damage type used for hits. minecraft:magic ignores armor." },
+    regions.playersOption(),
     regions.exemptOptions()[1],
     regions.exemptOptions()[2],
   },
 
   queries = function(region, s)
-    return { regions.positionsQuery(region, regions.notExempt(s)) }
+    return regions.playerQueries(region, s, s.players)
   end,
 
   -- ctx.state maps player name -> { entered, lastHit, lastWarn } while inside.
   act = function(region, s, ctx, results)
     local actions, seen = {}, {}
-    local out = results[regions.positionsQuery(region, regions.notExempt(s))].out
-    for _, p in ipairs(cmd.parsePositions(out)) do
+    local players = regions.parseAll(regions.playerQueries(region, s, s.players), results)
+    for _, p in ipairs(players) do
       if regions.contains(region, p.x, p.y, p.z) then
         seen[p.name] = true
         local st = ctx.state[p.name]

@@ -2,8 +2,10 @@
 --
 --   local regions = require("regions")
 --
--- A region is { name, dim, area = { x0, y0, z0, x1, y1, z1 }, features = {
--- <feature name> = <settings table>, ... } }. Regions are stored in command
+-- A region is { name, dim, shapes = { shape, ... }, features = {
+-- <feature name> = <settings table>, ... } } (shapes: see lib/shapes.lua; the
+-- region is all its shapes together, and area holds their block bounds).
+-- Regions are stored in command
 -- storage (ccregion:store, saved with the world) as one JSON string each, so
 -- every command computer sees the same regions.
 --
@@ -31,8 +33,15 @@
 -- screen. Features with neither queries nor act don't need controld at all.
 --
 -- This module also holds helpers features share (exemptions, selectors, ...).
+-- To limit a feature to some players (a rule like "team:blue and not
+-- tag:ref", see lib/predicate.lua), add M.playersOption() to its options and
+-- use M.playerQueries(region, settings, settings.players) as its queries and
+-- M.parseAll(...) in act; killzone does this. Use M.contains(region, x, y, z)
+-- to test positions: it covers all the region's shapes.
 
 local cmd = require("cmd")
+local predicate = require("predicate")
+local shapes = require("shapes")
 
 local M = {}
 
@@ -55,7 +64,21 @@ local function normalize(r)
   for name, settings in pairs(r.features) do
     if type(settings) ~= "table" then r.features[name] = {} end
   end
+  -- Regions saved before shapes existed have just an area: one box.
+  if type(r.shapes) ~= "table" or #r.shapes == 0 then
+    local a = r.area or { 0, 0, 0, 0, 0, 0 }
+    r.shapes = { { type = "box", from = { a[1], a[2], a[3] }, to = { a[4], a[5], a[6] } } }
+  end
+  M.updateArea(r)
   return r
+end
+
+--- Recompute region.area, the block bounds of all its shapes
+-- ({ x0, y0, z0, x1, y1, z1 }, inclusive), after changing its shapes.
+function M.updateArea(r)
+  local x0, y0, z0, x1, y1, z1 = shapes.boundsAll(r.shapes)
+  r.area = { math.floor(x0), math.floor(y0), math.floor(z0),
+    math.ceil(x1) - 1, math.ceil(y1) - 1, math.ceil(z1) - 1 }
 end
 
 --- All regions, as a name -> region table.
@@ -106,16 +129,34 @@ end
 ---------------------------------------------------------------------------
 -- Helpers for features.
 
---- Outer bounds of a region's area: X0, Y0, Z0, X1, Y1, Z1 (max + 1).
+--- Outer bounds of a region (all its shapes): X0, Y0, Z0, X1, Y1, Z1.
 function M.bounds(region)
   local a = region.area
   return a[1], a[2], a[3], a[4] + 1, a[5] + 1, a[6] + 1
 end
 
---- Whether a position (a player's feet) is inside the region.
+--- Whether a position (a player's feet) is inside the region (any shape).
 function M.contains(region, x, y, z)
-  local X0, Y0, Z0, X1, Y1, Z1 = M.bounds(region)
-  return x >= X0 and x <= X1 and y >= Y0 and y <= Y1 and z >= Z0 and z <= Z1
+  for _, s in ipairs(region.shapes) do
+    if shapes.contains(s, x, y, z) then return true end
+  end
+  return false
+end
+
+--- The nearest position inside the region where a player's hitbox fits.
+function M.nearestInside(region, x, y, z)
+  local best, bx, by, bz
+  for _, s in ipairs(region.shapes) do
+    local ix, iy, iz = shapes.inside(s, x, y, z, 0.3, 1.8)
+    local d = (ix - x) ^ 2 + (iy - y) ^ 2 + (iz - z) ^ 2
+    if not best or d < best then best, bx, by, bz = d, ix, iy, iz end
+  end
+  return bx, by, bz
+end
+
+--- Where to teleport players into the region: x, y, z (its first shape's spot).
+function M.spawn(region)
+  return shapes.spawn(region.shapes[1])
 end
 
 --- Selector arguments matching entities whose hitbox touches the region,
@@ -133,6 +174,52 @@ end
 function M.positionsQuery(region, filter)
   return string.format("execute in %s as @e[type=minecraft:player,%s%s] run data get entity @s Pos",
     region.dim, M.volume(region), filter ~= "" and ("," .. filter) or "")
+end
+
+--- Option spec for "which players this applies to" (a predicate rule, see
+-- lib/predicate.lua), for features to include in their options. Use it with
+-- M.playerQueries.
+function M.playersOption()
+  return { name = "players", type = "predicate", arg = "<rule>", convert = predicate.convert,
+    desc = "Only players matching a rule, e.g. \"team:blue and not tag:ref\"",
+    hint = "Who this applies to. Everyone if empty. In the app: tap to pick conditions. " ..
+      "As text: team:blue, tag:x, gamemode:survival, player:Steve, level:5.., " ..
+      "score:kills=3.., datapack:pack:id, combined with and, or, not, ( )." }
+end
+
+--- The exemption rules of a feature's settings, as a predicate rule.
+function M.exemptRule(settings)
+  local rules = { { ["not"] = { type = "tag", tag = M.EXEMPT_TAG } } }
+  for _, m in ipairs(M.exemptModes(settings)) do
+    rules[#rules + 1] = { ["not"] = { type = "gamemode", mode = m } }
+  end
+  return { all = rules }
+end
+
+--- Commands printing the positions of living, non-exempt players matching
+-- the rule (nil = everyone) whose hitbox touches the region: one command per
+-- alternative of the rule. A player may appear in several outputs; parse
+-- each with cmd.parsePositions and merge by name (see M.parseAll).
+function M.playerQueries(region, settings, rule)
+  local queries = {}
+  for _, sel in ipairs(predicate.selectors(rule, M.exemptRule(settings))) do
+    queries[#queries + 1] = M.positionsQuery(region, sel)
+  end
+  return queries
+end
+
+--- Parse the outputs of a list of queries into players (deduplicated).
+function M.parseAll(queries, results)
+  local players, seen = {}, {}
+  for _, q in ipairs(queries) do
+    for _, p in ipairs(cmd.parsePositions(results[q] and results[q].out)) do
+      if not seen[p.name] then
+        seen[p.name] = true
+        players[#players + 1] = p
+      end
+    end
+  end
+  return players
 end
 
 --- Option specs for gamemode exemptions, for features to include in their

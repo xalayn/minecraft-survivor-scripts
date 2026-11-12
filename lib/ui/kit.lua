@@ -293,13 +293,170 @@ local function choiceButton(form, x, y, width, o, value)
   return { get = function() return o.choices[index] end }
 end
 
+---------------------------------------------------------------------------
+-- Overlays: full-screen panels on top of the current screen (so its
+-- unsaved state survives), e.g. editors opened from a form. Back closes the
+-- top one.
+
+local overlays = {}
+
+--- Open an overlay with a title bar; returns its frame. Close it with
+-- kit.closeOverlay(); onClose (optional) runs when it's closed.
+function kit.openOverlay(title, onClose)
+  local frame = root:addFrame({ x = 1, y = 1, width = W, height = H, background = C.bg,
+    z = 500 + #overlays })
+  frame:addLabel({ x = 1, y = 1, width = W, height = 1, text = "", background = C.head })
+  frame:addButton({ x = 1, y = 1, width = 3, height = 1, text = "<",
+    background = C.head, foreground = C.headIcon }):onClick(function() kit.closeOverlay() end)
+  frame:addLabel({ x = 4, y = 1, width = W - 3, height = 1, text = title,
+    background = C.head, foreground = C.headText })
+  overlays[#overlays + 1] = { frame = frame, onClose = onClose, token = screen.token }
+  return frame
+end
+
+--- Close the top overlay (if any). Returns true if one was closed.
+function kit.closeOverlay()
+  local top = table.remove(overlays)
+  if not top then return false end
+  if top.frame.parent then root:removeChild(top.frame) end
+  if top.onClose then top.onClose() end
+  return true
+end
+
+--- Whether an overlay of the current screen is open.
+function kit.overlayOpen()
+  while #overlays > 0 and overlays[#overlays].token ~= screen.token do table.remove(overlays) end
+  return #overlays > 0
+end
+
+---------------------------------------------------------------------------
+-- Player rule editor (see lib/predicate.lua): match all/any of a list of
+-- conditions, each optionally negated. onDone(rule) gets the result.
+
+local predicate = require("predicate")
+
+local function ruleItems(rule)
+  -- The editor handles: everyone, one condition (maybe negated), or all/any of
+  -- such conditions. Returns mode, conditions; or nil if it's more complex.
+  if rule == nil then return "all", {} end
+  local function simple(r) return r.type or (r["not"] and r["not"].type) end
+  if simple(rule) then return "all", { rule } end
+  local mode = rule.all and "all" or rule.any and "any"
+  if not mode then return nil end
+  for _, r in ipairs(rule[mode]) do if not simple(r) then return nil end end
+  local copy = {}
+  for i, r in ipairs(rule[mode]) do copy[i] = r end
+  return mode, copy
+end
+
+local function conditionForm(onAdd)
+  local _, types = predicate.types()
+  local picker = kit.openOverlay("Add condition")
+  local list = picker:addList({ x = 1, y = 3, width = W, height = H - 2, background = C.bg,
+    foreground = C.text, selectionBackground = C.select, selectionForeground = C.selectText })
+  for _, t in ipairs(types) do
+    list:addItem({ text = " " .. (t.description or t.name), callback = function()
+      local form = kit.openOverlay(t.description or t.name)
+      local read = kit.addForm(3, H - 4, t.params, nil, form)
+      local negate
+      if t.negatable then
+        kit.addHintLabel(form, 2, H - 2, "Not", "Match players who DON'T meet this condition.")
+        negate = form:addSwitch({ x = W - 5, y = H - 2, width = 4, onColor = C.primary, offColor = C.faint })
+      end
+      kit.addButton(form, 2, H, W - 2, "Add", "primary", function()
+        local p, err = read()
+        if not p then return kit.toast(err, "error", 4) end
+        p.type = t.name
+        local node = (negate and negate.checked) and { ["not"] = p } or p
+        local ok, verr = pcall(function()
+          local v, e = predicate.validate(node)
+          if e then error(e, 0) end
+          return v
+        end)
+        if not ok then return kit.toast(tostring(verr), "error", 4) end
+        kit.closeOverlay() -- form
+        kit.closeOverlay() -- picker
+        onAdd(node)
+      end)
+    end })
+  end
+end
+
+--- Open the rule editor for a rule; onDone(rule) runs with the new rule
+-- (nil = everyone) when the user taps Done.
+function kit.editRule(title, rule, onDone)
+  local frame = kit.openOverlay(title)
+  local mode, items = ruleItems(rule)
+  if not mode then
+    frame:addLabel({ x = 2, y = 3, text = "Too complex to edit here:", foreground = C.muted })
+    frame:addLabel({ x = 2, y = 5, width = W - 2, height = 3,
+      text = table.concat(kit.wrap(predicate.toText(rule), W - 2), "\n"), foreground = C.text })
+    kit.addButton(frame, 2, H, W - 2, "Clear (everyone)", "danger", function()
+      kit.closeOverlay()
+      onDone(nil)
+    end)
+    return
+  end
+
+  local modeButton = frame:addButton({ x = 2, y = 3, width = W - 2, height = 1,
+    background = C.field, foreground = C.fieldText })
+  local list = frame:addList({ x = 1, y = 5, width = W, height = H - 7, background = C.bg,
+    foreground = C.text, selectionBackground = C.select, selectionForeground = C.selectText,
+    emptyText = "Everyone (no conditions)", emptyTextColor = C.faint })
+
+  local refresh
+  local function result()
+    if #items == 0 then return nil end
+    if #items == 1 then return items[1] end
+    return { [mode] = items }
+  end
+  function refresh()
+    modeButton.text = #items < 2 and "Tap a condition to remove it"
+      or ("Match: " .. (mode == "all" and "ALL of these" or "ANY of these"))
+    list:clear()
+    for i, node in ipairs(items) do
+      list:addItem({ text = " " .. predicate.describe(node), callback = function()
+        kit.confirm("Remove", "Remove \"" .. predicate.describe(node) .. "\"?", function()
+          table.remove(items, i)
+          refresh()
+        end)
+      end })
+    end
+  end
+  modeButton:onClick(function()
+    if #items >= 2 then
+      mode = mode == "all" and "any" or "all"
+      refresh()
+    end
+  end)
+  refresh()
+
+  local bw = math.floor((W - 3) / 2)
+  kit.addButton(frame, 2, H - 1, W - 2, "+ Add condition", "neutral", function()
+    conditionForm(function(node)
+      items[#items + 1] = node
+      refresh()
+    end)
+  end)
+  kit.addButton(frame, 2, H, bw, "Everyone", "neutral", function()
+    items = {}
+    refresh()
+  end)
+  kit.addButton(frame, W - bw, H, bw, "Done", "primary", function()
+    kit.closeOverlay()
+    onDone(result())
+  end)
+end
+
 --- A scrollable form from row y to row bottom with one row per option: a
--- tappable name (shows the hint) and a control (switch, text field, or a
--- button cycling through choices). values: current values (defaults used
--- for missing ones). Returns read(), which returns the entered values, or
--- nil and an error message.
-function kit.addForm(y, bottom, options, values)
-  local form = root:addFrame({ x = 1, y = y, width = W, height = bottom - y + 1,
+-- tappable name (shows the hint) and a control (switch, text field, a
+-- button cycling through choices, or a player-rule button). values: current
+-- values (defaults used for missing ones). parent: the frame to add it to
+-- (default: the screen). Returns read(), which returns the entered values,
+-- or nil and an error message.
+function kit.addForm(y, bottom, options, values, parent)
+  parent = parent or root
+  local form = parent:addFrame({ x = 1, y = y, width = W, height = bottom - y + 1,
     background = C.bg, scrollable = true })
   local controls = {}
   local row = 1
@@ -307,7 +464,25 @@ function kit.addForm(y, bottom, options, values)
     local value = values and values[o.name]
     if value == nil then value = o.default end
     kit.addHintLabel(form, 2, row, kit.optionLabel(o), kit.optionHint(o))
-    if (o.type or "boolean") == "boolean" then
+    if o.type == "predicate" then
+      -- A rule: a button showing it; tapping opens the rule editor.
+      local rule = value
+      local b = form:addButton({ x = 2, y = row + 1, width = W - 3, height = 1,
+        background = C.field, foreground = C.fieldText })
+      local function show()
+        local d = predicate.describe(rule)
+        b.text = (#d > W - 3) and (d:sub(1, W - 6) .. "...") or d
+      end
+      b:onClick(function()
+        kit.editRule(kit.optionLabel(o), rule, function(newRule)
+          rule = newRule
+          show()
+        end)
+      end)
+      show()
+      controls[o.name] = { get = function() return rule end }
+      row = row + 1
+    elseif (o.type or "boolean") == "boolean" then
       local sw = form:addSwitch({ x = W - 5, y = row, width = 4, checked = value == true,
         onColor = C.primary, offColor = C.faint })
       controls[o.name] = { get = function() return sw.checked end }

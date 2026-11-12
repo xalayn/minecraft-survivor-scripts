@@ -1,4 +1,4 @@
--- draw: show the region as a box (see the box program). The drawing is made
+-- draw: show the region's shapes (see the box program). The drawing is made
 -- when the feature is added and removed with it; it needs no controld.
 
 local boxdraw = require("boxdraw")
@@ -27,7 +27,7 @@ return {
   },
 
   enable = function(region, s)
-    return boxdraw.draw(boxName(region), region.area, {
+    return boxdraw.drawShapes(boxName(region), region.shapes, {
       block = s.block,
       walls = s.walls,
       opacity = s.opacity,

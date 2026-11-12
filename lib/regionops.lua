@@ -11,6 +11,7 @@ local cmd = require("cmd")
 local regions = require("regions")
 local control = require("control")
 local players = require("players")
+local shapes = require("shapes")
 
 local M = {}
 
@@ -54,30 +55,77 @@ function M.get(name)
   return true, r
 end
 
---- Create a region from two corners: { x, y, z } block positions.
-function M.create(name, p1, p2, dim)
+--- Create a region from a shape (see lib/shapes.lua), in a dimension
+-- (default: the computer's).
+function M.create(name, shape, dim)
   if type(name) ~= "string" or name == "" then return false, "Missing region name" end
   name = cmd.sanitize(name)
-  for _, p in ipairs({ p1, p2 }) do
-    if type(p) ~= "table" or type(p[1]) ~= "number" or type(p[2]) ~= "number" or type(p[3]) ~= "number" then
-      return false, "Bad corner"
-    end
-  end
+  local s, serr = shapes.check(shape)
+  if not s then return false, serr end
   if dim ~= nil and not cmd.lastId(dim) then return false, "Bad dimension" end
   if regions.get(name) then return false, "Region '" .. name .. "' already exists" end
-  local f = math.floor
   local r = {
     name = name,
     dim = dim and cmd.lastId(dim) or cmd.dimension(),
-    area = {
-      math.min(f(p1[1]), f(p2[1])), math.min(f(p1[2]), f(p2[2])), math.min(f(p1[3]), f(p2[3])),
-      math.max(f(p1[1]), f(p2[1])), math.max(f(p1[2]), f(p2[2])), math.max(f(p1[3]), f(p2[3])),
-    },
+    shapes = { s },
     features = {},
   }
+  regions.updateArea(r)
   local ok, err = regions.save(r)
   if not ok then return false, "Couldn't save: " .. tostring(err) end
   return true, r
+end
+
+-- After a region's shapes change: save it and redo features that set
+-- something up (e.g. redraw its drawing). Returns true and the region, or
+-- false and an error.
+local function reshaped(r)
+  regions.updateArea(r)
+  local ok, err = regions.save(r)
+  if not ok then return false, "Couldn't save: " .. tostring(err) end
+  local problems = {}
+  for fname, settings in pairs(r.features) do
+    local f = regions.feature(fname)
+    if f and f.enable then
+      if f.disable then pcall(f.disable, r, settings) end
+      local eok, emsg = f.enable(r, settings)
+      if not eok then problems[#problems + 1] = fname .. ": " .. tostring(emsg) end
+    end
+  end
+  if #problems > 0 then return false, table.concat(problems, "; ") end
+  return true, r
+end
+
+--- Add a shape to a region (the region becomes all its shapes together).
+function M.addShape(name, shape)
+  local r, err = findRegion(name)
+  if not r then return false, err end
+  local s, serr = shapes.check(shape)
+  if not s then return false, serr end
+  r.shapes[#r.shapes + 1] = s
+  return reshaped(r)
+end
+
+--- Remove a region's shape by its number (1 = first). A region keeps at
+-- least one shape.
+function M.removeShape(name, index)
+  local r, err = findRegion(name)
+  if not r then return false, err end
+  index = tonumber(index)
+  if not index or not r.shapes[index] then return false, "No shape number " .. tostring(index) end
+  if #r.shapes == 1 then return false, "A region needs at least one shape" end
+  table.remove(r.shapes, index)
+  return reshaped(r)
+end
+
+--- Shape types: a list of { name, description, usage, steps }.
+function M.shapeTypes()
+  local list = {}
+  for _, n in ipairs(shapes.typeNames()) do
+    local t = shapes.type(n)
+    if t then list[#list + 1] = { name = n, description = t.description, usage = t.usage, steps = t.steps } end
+  end
+  return true, list
 end
 
 --- Attach a feature to a region, or replace its settings. `values` is a table
@@ -170,9 +218,8 @@ function M.teleport(player, name)
   if not validPlayer(player) then return false, "Bad player name" end
   local r, err = findRegion(name)
   if not r then return false, err end
-  local a = r.area
-  local x, y, z = (a[1] + a[4] + 1) / 2, a[2], (a[3] + a[6] + 1) / 2
-  local ok, out = commands.exec(string.format("execute in %s run tp %s %.1f %d %.1f", r.dim, player, x, y, z))
+  local x, y, z = regions.spawn(r)
+  local ok, out = commands.exec(string.format("execute in %s run tp %s %.2f %.2f %.2f", r.dim, player, x, y, z))
   if not ok then return false, (out and out[1]) or "Teleport failed" end
   return true, { x, y, z, dim = r.dim }
 end

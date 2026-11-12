@@ -25,6 +25,9 @@
 --   min/max  Bounds for numbers.
 --   pattern  Lua pattern that strings must match (e.g. "^[%w_:]+$").
 --   choices  List of allowed values (strings).
+--   convert  Function(value) -> converted, or nil and an error, for structured
+--            values: gets the text from the command line, or the value as
+--            sent (e.g. a table) when validating. Replaces the checks above.
 --   check    Optional function(value) returning an error string if invalid.
 --   arg      Placeholder shown in help for non-booleans (default: <type>).
 --   desc     Help text (command-line help).
@@ -39,6 +42,11 @@
 local M = {}
 
 local function convert(opt, label, raw)
+  if opt.convert then
+    local v, err = opt.convert(raw)
+    if err then return nil, label .. ": " .. err end
+    return v
+  end
   local t = opt.type or "boolean"
   local v = raw
   if t == "number" then
@@ -82,7 +90,7 @@ function M.validate(options, values)
       if type(v) ~= "boolean" then return nil, o.name .. " must be true or false" end
       result[o.name] = v
     else
-      local converted, err = convert(o, o.name, tostring(v))
+      local converted, err = convert(o, o.name, o.convert and v or tostring(v))
       if err then return nil, err end
       result[o.name] = converted
     end

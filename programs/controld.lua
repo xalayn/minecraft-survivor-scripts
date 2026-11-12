@@ -23,6 +23,7 @@
 package.path = "/lib/?.lua;" .. package.path
 local control = require("control")
 local players = require("players")
+local predicate = require("predicate")
 local rpc = require("rpc")
 
 if not commands then
@@ -75,6 +76,7 @@ local HANDLERS = {
   end,
   ["core.playerPos"] = players.blockPos,
   ["core.players"] = players.online,
+  ["core.predicateTypes"] = predicate.types,
 }
 
 -- Load module server parts.

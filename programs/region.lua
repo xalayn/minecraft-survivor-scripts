@@ -8,6 +8,9 @@
 --
 -- Usage:
 --   region create <name> <x1> <y1> <z1> <x2> <y2> <z2>
+--   region create <name> <shape> <shape args...>
+--   region shape add <name> <shape> <shape args...>
+--   region shape remove <name> <number>
 --   region add <name> <feature> [feature options]
 --   region remove <name> <feature>
 --   region delete <name> [-y]
@@ -15,20 +18,31 @@
 --   region info <name>
 --   region features [feature]
 --
---   create    Define a region in this computer's dimension. Coords accept
---             ~ / ~5 relative to this computer; both corner blocks are included.
+--   create    Define a region in this computer's dimension, with one shape:
+--             6 coordinates for a box, or a shape type and its arguments.
+--             Coordinates accept ~ / ~5 relative to this computer; a box
+--             includes both corner blocks.
+--   shape     Add another shape to a region (it becomes all its shapes
+--             together), or remove one by its number (see region info).
 --   add       Attach a feature, or change its options if already attached.
 --   remove    Detach a feature, undoing its effects.
 --   delete    Detach all features and delete the region. Asks first unless -y.
 --   features  List available features, or one feature's options.
 --
+-- Shapes:
+--   box       <x1> <y1> <z1> <x2> <y2> <z2>     two opposite corner blocks
+--   sphere    <x> <y> <z> <radius>              around a center block
+--   cylinder  <x> <y> <z> <radius> <height>     upright, on a center block
+--
 -- Features (see `region features`):
---   draw      Show the region as a box.
+--   draw      Show the region's shapes.
 --   boundary  Players can't leave.
 --   killzone  Kills or damages players inside.
 --
 -- Examples:
 --   region create arena ~-20 ~ ~-20 ~20 ~30 ~20
+--   region create dome sphere ~ ~ ~ 15
+--   region shape add arena cylinder ~30 ~ ~ 8 20
 --   region add arena draw --block red_concrete --xray
 --   region add arena boundary
 --   region add arena killzone --delay 5 --damage 4 --interval 2
@@ -40,7 +54,9 @@ local argparse = require("args")
 local cmd = require("cmd")
 local regions = require("regions")
 local regionops = require("regionops")
+local shapes = require("shapes")
 local control = require("control")
+local predicate = require("predicate")
 
 if not commands then
   printError("region requires a Command Computer")
@@ -50,6 +66,9 @@ end
 local function usage()
   print("Usage:")
   print("  region create <name> <x1> <y1> <z1> <x2> <y2> <z2>")
+  print("  region create <name> <shape> <args...>")
+  print("  region shape add <name> <shape> <args...>")
+  print("  region shape remove <name> <number>")
   print("  region add <name> <feature> [options]")
   print("  region remove <name> <feature>")
   print("  region delete <name> [-y]")
@@ -77,6 +96,10 @@ local function getRegion(name)
   return r
 end
 
+local function dimName(dim)
+  return (dim:gsub("^minecraft:", ""))
+end
+
 local function describeArea(r)
   local a = r.area
   return string.format("%d,%d,%d -> %d,%d,%d (%dx%dx%d) %s", a[1], a[2], a[3], a[4], a[5], a[6],
@@ -98,14 +121,53 @@ end
 
 local commandsBySub = {}
 
+-- Parse a shape from raw[from..]: "<shape type> <args...>", or just 6
+-- coordinates for a box. Returns the shape, or nil and an error.
+local function shapeFrom(from)
+  local typeName = raw[from]
+  local args = rest(from + 1)
+  if typeName and (tonumber(typeName) or typeName:sub(1, 1) == "~") then
+    typeName, args = "box", rest(from)
+  end
+  if not typeName then return nil, "Missing shape" end
+  local t, err = shapes.type(typeName)
+  if not t then return nil, err .. " (shapes: " .. table.concat(shapes.typeNames(), ", ") .. ")" end
+  local shape, serr = t.fromArgs(args, cmd.parseCoord)
+  if not shape then return nil, serr end
+  shape.type = typeName
+  return shape
+end
+
 function commandsBySub.create()
   local name = raw[2]
   if not name then return usage() end
-  local area, err = cmd.parseArea(raw, 3)
-  if not area then return printError(err) end
-  local ok, r = regionops.create(name, { area[1], area[2], area[3] }, { area[4], area[5], area[6] })
+  local shape, err = shapeFrom(3)
+  if not shape then return printError(err) end
+  local ok, r = regionops.create(name, shape)
   if not ok then return printError(r) end
-  print("Created region '" .. r.name .. "': " .. describeArea(r))
+  print("Created region '" .. r.name .. "': " .. shapes.describe(r.shapes[1]) .. " in " .. dimName(r.dim))
+end
+
+function commandsBySub.shape()
+  local action, name = raw[2], raw[3]
+  if action == "add" and name then
+    local shape, err = shapeFrom(4)
+    if not shape then return printError(err) end
+    local ok, r = regionops.addShape(name, shape)
+    if not ok then return printError(r) end
+    print("Added " .. shapes.describe(shape) .. " to '" .. r.name .. "' (now " .. #r.shapes .. " shapes)")
+  elseif action == "remove" and name and raw[4] then
+    local ok, r = regionops.removeShape(name, raw[4])
+    if not ok then return printError(r) end
+    print("Removed shape " .. raw[4] .. " from '" .. r.name .. "'")
+  else
+    printError("Usage: region shape add <name> <shape> <args...>")
+    printError("       region shape remove <name> <number>")
+    for _, n in ipairs(shapes.typeNames()) do
+      local t = shapes.type(n)
+      if t then print("  " .. n .. " " .. t.usage) end
+    end
+  end
 end
 
 function commandsBySub.add()
@@ -160,7 +222,7 @@ function commandsBySub.list()
   for _, name in ipairs(names) do
     local r = all[name]
     local feats = sortedKeys(r.features)
-    print(name .. "  " .. describeArea(r))
+    print(name .. "  " .. describeArea(r) .. (#r.shapes > 1 and (", " .. #r.shapes .. " shapes") or ""))
     if #feats > 0 then print("  " .. table.concat(feats, ", ")) end
   end
 end
@@ -169,10 +231,13 @@ function commandsBySub.info()
   local r = getRegion(raw[2])
   if not r then return end
   print(r.name .. "  " .. describeArea(r))
+  for i, s in ipairs(r.shapes) do print(string.format("  shape %d: %s", i, shapes.describe(s))) end
   for _, fname in ipairs(sortedKeys(r.features)) do
     local parts = {}
     for _, k in ipairs(sortedKeys(r.features[fname])) do
-      parts[#parts + 1] = k .. "=" .. tostring(r.features[fname][k])
+      local v = r.features[fname][k]
+      if type(v) == "table" then v = "\"" .. predicate.toText(v) .. "\"" end
+      parts[#parts + 1] = k .. "=" .. tostring(v)
     end
     print("  " .. fname .. (#parts > 0 and (": " .. table.concat(parts, " ")) or ""))
   end

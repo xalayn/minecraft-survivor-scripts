@@ -10,6 +10,7 @@
 -- briefly forceload those chunks (at most a few per box, at its corners).
 
 local cmd = require("cmd")
+local shapes = require("shapes")
 
 local M = {}
 
@@ -294,17 +295,31 @@ local ORIENT = {
 
 local FULLBRIGHT = "brightness:{sky:15,block:15}"
 
---- Draw a box, replacing any existing box with the same name.
--- area: { x0, y0, z0, x1, y1, z1 }, inclusive block corners (x0 <= x1 etc).
+-- Rotate vector v by quaternion q = { x, y, z, w }.
+local function rotate(q, vx, vy, vz)
+  local qx, qy, qz, qw = q[1], q[2], q[3], q[4]
+  -- t = 2 * cross(q.xyz, v); v' = v + w * t + cross(q.xyz, t)
+  local tx, ty, tz = 2 * (qy * vz - qz * vy), 2 * (qz * vx - qx * vz), 2 * (qx * vy - qy * vx)
+  return vx + qw * tx + (qy * tz - qz * ty), vy + qw * ty + (qz * tx - qx * tz), vz + qw * tz + (qx * ty - qy * tx)
+end
+
+--- Draw shapes (see lib/shapes.lua) as one drawing, replacing any existing
+-- drawing with the same name.
 -- o (all optional):
 --   block      edge block (default lime_concrete)
---   walls      draw translucent walls (default true)
+--   walls      draw translucent walls on boxes (default true)
 --   opacity    wall opacity percent (default 20)
 --   wallColor  wall RGB number or color string (default: edge block's dye color, or white)
 --   xray       edges visible through blocks (glowing outline)
 --   dim        dimension (default: the computer's)
 -- Returns true and a summary, or false and an error message.
-function M.draw(name, area, o)
+--
+-- Shapes draw themselves with the helpers in the table passed to their draw():
+--   d.edge(x, y, z, sx, sy, sz)        an axis-aligned bar from its min corner
+--   d.segment(ax, ay, az, bx, by, bz)  a bar between two points
+--   d.panel(dir, x, y, z, w, l)        a one-sided translucent wall panel
+--   d.thickness, d.walls, d.wallInset
+function M.drawShapes(name, list, o)
   o = o or {}
   local block = withNamespace(o.block or M.DEFAULT_BLOCK)
   local walls = o.walls ~= false
@@ -320,16 +335,12 @@ function M.draw(name, area, o)
     wallRGB = o.wallColor
   end
 
-  -- Block corners (inclusive) and outer bounds (max + 1 so both corner blocks are enclosed).
-  local bx0, by0, bz0, bx1, by1, bz1 = table.unpack(area)
-  local x0, x1, y0, y1, z0, z1 = bx0, bx1 + 1, by0, by1 + 1, bz0, bz1 + 1
-  local dx, dy, dz = x1 - x0, y1 - y0, z1 - z0
   local t = THICKNESS
   local h = t / 2
-
   local tags = string.format('Tags:["%s","%s"]', M.BASE_TAG, M.tagFor(name))
+  local parts = {}
 
-  -- Chunks the box's entities are stored in (an entity lives in the chunk
+  -- Chunks the entities are stored in (an entity lives in the chunk
   -- containing its position), for loading them again on remove.
   local chunks, chunkSeen = {}, {}
   local function track(x, z)
@@ -346,17 +357,44 @@ function M.draw(name, area, o)
     glow = string.format("Glowing:1b,glow_color_override:%d,", edgeRGB or 0xFFFFFF)
   end
 
-  local function edge(x, y, z, sx, sy, sz)
+  -- A block_display bar. width/height is the client's culling box (centered
+  -- horizontally on the entity, extending up); sized to cover what's
+  -- rendered. view_range keeps large drawings visible from afar.
+  local function bar(x, y, z, q, tx, ty, tz, sx, sy, sz, cullW, cullH)
     track(x, z)
-    -- width/height is the client's culling box (centered horizontally on the
-    -- entity, extending up); size it to cover what's rendered.
-    -- view_range keeps large boxes visible from afar.
-    return string.format(
+    parts[#parts + 1] = string.format(
       "execute in %s run summon minecraft:block_display %.4f %.4f %.4f {block_state:{Name:\"%s\"},"
-        .. "transformation:{left_rotation:[0f,0f,0f,1f],right_rotation:[0f,0f,0f,1f],"
-        .. "translation:[0f,0f,0f],scale:[%.4ff,%.4ff,%.4ff]},"
+        .. "transformation:{left_rotation:[%.6ff,%.6ff,%.6ff,%.6ff],right_rotation:[0f,0f,0f,1f],"
+        .. "translation:[%.4ff,%.4ff,%.4ff],scale:[%.4ff,%.4ff,%.4ff]},"
         .. "width:%.4ff,height:%.4ff,view_range:4f,%s,%s%s}",
-      dim, x, y, z, block, sx, sy, sz, 2 * math.max(sx, sz), sy, FULLBRIGHT, glow, tags)
+      dim, x, y, z, block, q[1], q[2], q[3], q[4], tx, ty, tz, sx, sy, sz,
+      cullW, cullH, FULLBRIGHT, glow, tags)
+  end
+
+  local d = { thickness = t, walls = walls, wallInset = WALL_INSET }
+
+  function d.edge(x, y, z, sx, sy, sz)
+    bar(x, y, z, { 0, 0, 0, 1 }, 0, 0, 0, sx, sy, sz, 2 * math.max(sx, sz), sy)
+  end
+
+  function d.segment(ax, ay, az, bx, by, bz)
+    if by < ay then ax, ay, az, bx, by, bz = bx, by, bz, ax, ay, az end -- start at the bottom
+    local dx, dy, dz = bx - ax, by - ay, bz - az
+    local len = math.sqrt(dx * dx + dy * dy + dz * dz)
+    if len < 1e-6 then return end
+    local ux, uy, uz = dx / len, dy / len, dz / len
+    -- Rotation taking +X (the bar's length) onto the direction.
+    local q
+    if ux < -0.999999 then
+      q = { 0, 1, 0, 0 }
+    else
+      local qx, qy, qz, qw = 0, -uz, uy, 1 + ux
+      local n = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
+      q = { qx / n, qy / n, qz / n, qw / n }
+    end
+    -- Center the bar's cross-section on the line.
+    local tx, ty, tz = rotate(q, 0, -h, -h)
+    bar(ax, ay, az, q, tx, ty, tz, len, t, t, 2 * math.max(math.abs(dx), math.abs(dz)) + 1, dy + 1)
   end
 
   local wallText = snbtText() and 'text:" "' or [[text:'" "']]
@@ -366,7 +404,7 @@ function M.draw(name, area, o)
 
   -- A one-sided panel with its corner at (x, y, z), w long along the orientation's
   -- ex axis and l long along its ey axis.
-  local function panel(dir, x, y, z, w, l)
+  function d.panel(dir, x, y, z, w, l)
     track(x, z)
     local or_ = ORIENT[dir]
     local sx, sy = w / QUAD_W, l / QUAD_H
@@ -374,7 +412,7 @@ function M.draw(name, area, o)
     local shift = -QUAD_X0 * sx
     local tx, ty, tz = or_.ex[1] * shift, or_.ex[2] * shift, or_.ex[3] * shift
     local height = or_.ey[2] == 1 and l or 0.1
-    return string.format(
+    parts[#parts + 1] = string.format(
       "execute in %s run summon minecraft:text_display %.4f %.4f %.4f {%s,background:%d,"
         .. "transformation:{left_rotation:[%.6ff,%.6ff,%.6ff,%.6ff],right_rotation:[0f,0f,0f,1f],"
         .. "translation:[%.4ff,%.4ff,%.4ff],scale:[%.4ff,%.4ff,1f]},"
@@ -383,51 +421,16 @@ function M.draw(name, area, o)
       2 * (w + l), height, FULLBRIGHT, tags)
   end
 
-  -- Edges are centered on the box boundary (half inside, half outside) so none
-  -- of their faces are coplanar with block faces (no z-fighting with terrain).
-  -- X edges run the full length including the corner cubes; Y and Z edges stop
-  -- short of the corners so edges never overlap each other either.
-  local parts = {}
-  for _, a in ipairs({ y0 - h, y1 - h }) do
-    for _, b in ipairs({ z0 - h, z1 - h }) do
-      parts[#parts + 1] = edge(x0 - h, a, b, dx + t, t, t) -- along X
-    end
-  end
-  for _, a in ipairs({ x0 - h, x1 - h }) do
-    for _, b in ipairs({ z0 - h, z1 - h }) do
-      parts[#parts + 1] = edge(a, y0 + h, b, t, dy - t, t) -- along Y
-    end
-  end
-  for _, a in ipairs({ x0 - h, x1 - h }) do
-    for _, b in ipairs({ y0 - h, y1 - h }) do
-      parts[#parts + 1] = edge(a, b, z0 + h, t, t, dz - t) -- along Z
-    end
+  for _, s in ipairs(list) do
+    local st, err = shapes.type(s.type)
+    if not st then return false, err end
+    st.draw(s, d)
   end
 
-  -- Walls fill the space between the edges, inset slightly into the box so they
-  -- don't z-fight with neighbouring blocks. Each wall is two panels back to back
-  -- so it's visible from inside and outside.
-  if walls then
-    local e = WALL_INSET
-    local ix, iy, iz = dx - t, dy - t, dz - t -- inner span between edges
-    for _, px in ipairs({ x0 + e, x1 - e }) do
-      parts[#parts + 1] = panel("-x", px, y0 + h, z0 + h, iz, iy)
-      parts[#parts + 1] = panel("+x", px, y0 + h, z1 - h, iz, iy)
-    end
-    for _, py in ipairs({ y0 + e, y1 - e }) do
-      parts[#parts + 1] = panel("-y", x0 + h, py, z0 + h, ix, iz)
-      parts[#parts + 1] = panel("+y", x0 + h, py, z1 - h, ix, iz)
-    end
-    for _, pz in ipairs({ z0 + e, z1 - e }) do
-      parts[#parts + 1] = panel("+z", x0 + h, y0 + h, pz, ix, iy)
-      parts[#parts + 1] = panel("-z", x1 - h, y0 + h, pz, ix, iy)
-    end
-  end
-
-  -- Redrawing a box with the same name replaces it.
+  -- Redrawing with the same name replaces it.
   M.remove(name, true)
 
-  -- Load the chunks (so boxes can be drawn anywhere), summon, and register.
+  -- Load the chunks (so drawings can be made anywhere), summon, and register.
   local failed, timedOut = 0, false
   withChunksLoaded(dim, chunks, function(loaded)
     if not loaded then
@@ -446,11 +449,14 @@ function M.draw(name, area, o)
   end)
 
   if timedOut then
-    return false, "Timed out waiting for chunks to load; box not drawn. Try again."
+    return false, "Timed out waiting for chunks to load; not drawn. Try again."
   end
+  local x0, y0, z0, x1, y1, z1 = shapes.boundsAll(list)
   if failed < #parts then
     registrySet(name, {
-      dim = dim, from = { bx0, by0, bz0 }, to = { bx1, by1, bz1 },
+      dim = dim,
+      from = { math.floor(x0), math.floor(y0), math.floor(z0) },
+      to = { math.ceil(x1) - 1, math.ceil(y1) - 1, math.ceil(z1) - 1 },
       count = #parts - failed, chunks = chunks,
     })
   end
@@ -458,8 +464,19 @@ function M.draw(name, area, o)
     return false, string.format("%d/%d parts failed", failed, #parts)
   end
   local wallInfo = walls and string.format(", walls %s%% #%06X", tostring(opacity), wallRGB) or ""
-  return true, string.format("Box '%s' drawn: %dx%dx%d (%s%s%s)", name, dx, dy, dz, block,
+  return true, string.format("'%s' drawn: %d part(s) (%s%s%s)", name, #parts, block,
     wallInfo, o.xray and ", xray" or "")
+end
+
+--- Draw a box, replacing any existing drawing with the same name.
+-- area: { x0, y0, z0, x1, y1, z1 }, inclusive block corners. o: as drawShapes.
+function M.draw(name, area, o)
+  local ok, msg = M.drawShapes(name, { { type = "box", from = { area[1], area[2], area[3] },
+    to = { area[4], area[5], area[6] } } }, o)
+  if ok then
+    msg = string.format("Box %s (%dx%dx%d)", msg, area[4] - area[1] + 1, area[5] - area[2] + 1, area[6] - area[3] + 1)
+  end
+  return ok, msg
 end
 
 return M

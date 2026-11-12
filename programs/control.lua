@@ -138,9 +138,12 @@ kit.basalt.schedule(function()
     local focused = root:getFocused()
     local typing = focused and focused.__name == "Input"
     local screen = kit.screen
-    if key == keys.backspace and screen.back and not typing
-        and not (screen.dialog and screen.dialog.visible) then
-      screen.back()
+    if key == keys.backspace and not typing and not (screen.dialog and screen.dialog.visible) then
+      if kit.overlayOpen() then
+        kit.closeOverlay()
+      elseif screen.back then
+        screen.back()
+      end
     end
   end
 end)
