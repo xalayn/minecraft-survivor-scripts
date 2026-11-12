@@ -272,7 +272,10 @@ end
 
 -- Walls are text_displays showing a single space with a translucent background,
 -- stretched into a panel. In the entity's local space, that background is a
--- quad spanning x = -0.05..0.075, y = 0..0.25 (z = 0), visible only from +Z.
+-- quad spanning x = QUAD_X0..QUAD_X0+QUAD_W, y = 0..QUAD_H (z = 0), visible
+-- only from +Z. (A space is 4px wide plus 1px padding = 5px; a line is 10px
+-- plus 1px padding = 11px; 1px = 0.025 blocks.)
+local QUAD_X0, QUAD_W, QUAD_H = -0.05, 0.125, 0.275
 -- Each orientation below rotates that quad: ex/ey are where its local x/y axes
 -- end up, and the quad is then visible from the side its normal points to.
 local S = math.sqrt(0.5)
@@ -294,9 +297,9 @@ if argb >= 0x80000000 then argb = argb - 0x100000000 end -- NBT ints are signed
 -- ex axis and l long along its ey axis.
 local function panel(dir, x, y, z, w, l)
   local o = ORIENT[dir]
-  local sx, sy = w / 0.125, l / 0.25
-  -- Shift so the quad's left edge (local x = -0.05) lands on the entity position.
-  local shift = 0.05 * sx
+  local sx, sy = w / QUAD_W, l / QUAD_H
+  -- Shift so the quad's left edge (local x = QUAD_X0) lands on the entity position.
+  local shift = -QUAD_X0 * sx
   local tx, ty, tz = o.ex[1] * shift, o.ex[2] * shift, o.ex[3] * shift
   local height = o.ey[2] == 1 and l or 0.1
   return string.format(
