@@ -3,7 +3,7 @@
 --
 -- Adding it creates a YAWP local region for each of the region's shapes
 -- (boxes become Cuboids, spheres Spheres; YAWP has no cylinders, so those are
--- skipped with a warning), named cc_<region>_<n>, with the chosen flags
+-- skipped with a warning), named cc-<region>-<n>, with the chosen flags
 -- denied. Removing it (or deleting the region) deletes them again; changing
 -- the region's shapes recreates them.
 --
@@ -82,7 +82,7 @@ return {
       if not a then
         skipped[#skipped + 1] = shapes.describe(shape)
       else
-        local name = "cc_" .. region.name .. "_" .. i
+        local name = yawp.regionName(region.name, i)
         local base = string.format("yawp local %s %s ", region.dim, name)
         -- Create it, and check it really was: YAWP may answer "success" while
         -- only printing why it refused.

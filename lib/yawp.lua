@@ -91,6 +91,14 @@ function M.available()
   return availability[1], availability[2]
 end
 
+--- The YAWP region name for shape n of one of our regions: cc-<region>-<n>.
+-- YAWP names must start with a letter, contain only letters, digits and
+-- hyphens, end with a letter or digit, and be at least 3 long (checked
+-- against YAWP 0.6.3), so other characters in the region name become hyphens.
+function M.regionName(regionName, n)
+  return "cc-" .. regionName:gsub("[^%w]", "-") .. "-" .. n
+end
+
 --- Run YAWP commands in order; returns true, or false and the first error.
 function M.run(list)
   for _, c in ipairs(list) do
