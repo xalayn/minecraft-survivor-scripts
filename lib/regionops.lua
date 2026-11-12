@@ -77,23 +77,31 @@ function M.create(name, shape, dim)
 end
 
 -- After a region's shapes change: save it and redo features that set
--- something up (e.g. redraw its drawing). Returns true and the region, or
+-- something up (e.g. redraw its drawing), keeping their warnings in
+-- region.warnings. Returns true and { region, warnings = { "feature: text" } },
+-- or
 -- false and an error.
 local function reshaped(r)
   regions.updateArea(r)
   local ok, err = regions.save(r)
   if not ok then return false, "Couldn't save: " .. tostring(err) end
-  local problems = {}
+  local problems, warnings = {}, {}
   for fname, settings in pairs(r.features) do
     local f = regions.feature(fname)
     if f and f.enable then
       if f.disable then pcall(f.disable, r, settings) end
-      local eok, emsg = f.enable(r, settings)
-      if not eok then problems[#problems + 1] = fname .. ": " .. tostring(emsg) end
+      local eok, emsg, ewarn = f.enable(r, settings)
+      if not eok then
+        problems[#problems + 1] = fname .. ": " .. tostring(emsg)
+      else
+        r.warnings[fname] = ewarn
+        if ewarn then warnings[#warnings + 1] = fname .. ": " .. ewarn end
+      end
     end
   end
+  regions.save(r) -- with the updated warnings
   if #problems > 0 then return false, table.concat(problems, "; ") end
-  return true, r
+  return true, { region = r, warnings = warnings }
 end
 
 --- Add a shape to a region (the region becomes all its shapes together).
@@ -137,25 +145,32 @@ function M.setFeature(name, fname, values)
   if type(fname) ~= "string" then return false, "Missing feature name" end
   local f, ferr = regions.feature(fname)
   if not f then return false, ferr end
+  local avail, why = M.featureAvailable(f)
+  if not avail then return false, fname .. " is unavailable: " .. tostring(why) end
   local settings, verr = args.validate(f.options or {}, values)
   if not settings then return false, verr end
 
   if r.features[fname] then disable(r, fname) end
   local message
   if f.enable then
-    local ok, msg = f.enable(r, settings)
+    local ok, msg, warn = f.enable(r, settings)
     if not ok then
       -- Don't record a feature whose setup failed.
       r.features[fname] = nil
+      r.warnings[fname] = nil
       regions.save(r)
       return false, fname .. ": " .. tostring(msg)
     end
     message = msg
+    r.warnings[fname] = warn
+  else
+    r.warnings[fname] = nil
   end
   r.features[fname] = settings
   regions.save(r)
   return true, {
     message = message,
+    warning = r.warnings[fname],
     needsDaemon = (f.queries or f.act) and not control.daemon() or false,
   }
 end
@@ -167,6 +182,7 @@ function M.removeFeature(name, fname)
   if not r.features[fname] then return false, "'" .. r.name .. "' has no " .. tostring(fname) .. " feature" end
   local derr = disable(r, fname)
   r.features[fname] = nil
+  r.warnings[fname] = nil
   regions.save(r)
   if derr then return false, fname .. ": " .. derr end
   return true
@@ -181,17 +197,29 @@ function M.delete(name)
   return true
 end
 
+--- Whether a feature can be used here (its optional available() check, e.g.
+-- a required mod): ok, reason.
+function M.featureAvailable(f)
+  if not f.available then return true end
+  local ok, avail, reason = pcall(f.available)
+  if not ok then return false, tostring(avail) end
+  return avail and true or false, reason
+end
+
 --- Available features: a list of { name, description, options, continuous }.
 function M.features()
   local list = {}
   for _, name in ipairs(regions.featureNames()) do
     local f = regions.feature(name)
     if f then
+      local available, reason = M.featureAvailable(f)
       list[#list + 1] = {
         name = name,
         description = f.description,
         options = plainOptions(f.options),
         continuous = (f.queries or f.act) and true or false,
+        available = available,
+        unavailableReason = reason,
       }
     end
   end

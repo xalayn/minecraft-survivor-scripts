@@ -175,6 +175,39 @@ function M.parse(options, argv)
   return pos, opts
 end
 
+
+--- A `convert` function for options holding several values (type = "list"):
+-- accepts text ("a,b c") from the command line or a list (from an app); each
+-- item must be one of choices (if given) and match pattern (if given).
+function M.listOf(choices, pattern)
+  local allowed
+  if choices then
+    allowed = {}
+    for _, c in ipairs(choices) do allowed[c] = true end
+  end
+  return function(v)
+    local items = {}
+    if v == nil then return {} end
+    if type(v) == "string" then
+      for w in v:gmatch("[^,%s]+") do items[#items + 1] = w end
+    elseif type(v) == "table" then
+      for _, w in ipairs(v) do items[#items + 1] = w end
+    else
+      return nil, "must be a list"
+    end
+    local out, seen = {}, {}
+    for _, w in ipairs(items) do
+      if type(w) ~= "string" then return nil, "must be a list of names" end
+      if allowed and not allowed[w] then return nil, "unknown value '" .. w .. "'" end
+      if pattern and not w:match(pattern) then return nil, "invalid value '" .. w .. "'" end
+      if not seen[w] then
+        seen[w] = true
+        out[#out + 1] = w
+      end
+    end
+    return out
+  end
+end
 --- Help lines describing the options, for printing under a usage message.
 function M.help(options)
   local rows, width = {}, 0

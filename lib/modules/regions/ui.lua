@@ -23,11 +23,13 @@ local function features()
   return featureCache
 end
 
--- The settings of one feature on a region. current: its settings if added.
-local function featureForm(regionName, info, current)
+-- The settings of one feature on a region. current: its settings if added;
+-- warning: its current warning, if any (shown at the top).
+local function featureForm(regionName, info, current, warning)
   local title = regionName .. " - " .. info.name
   kit.newScreen(title, kit.backTo(regionScreen, regionName))
   local _, y = kit.addText(3, info.description or info.name)
+  if warning then _, y = kit.addText(y + 1, "! " .. warning, C.warn) end
   if #info.options > 0 then _, y = kit.addText(y, "Tap a name for help.", C.faint) end
   local read = kit.addForm(y + 1, kit.H - 2, info.options, current)
 
@@ -37,7 +39,9 @@ local function featureForm(regionName, info, current)
     local result = kit.call("regions.setFeature", regionName, info.name, v)
     if not result then return end
     local text = (current and "Saved " or "Added ") .. info.name
-    if type(result) == "table" and result.needsDaemon then
+    if type(result) == "table" and result.warning then
+      regionScreen(regionName, { text .. ". " .. result.warning, "warning" })
+    elseif type(result) == "table" and result.needsDaemon then
       regionScreen(regionName, { text .. ", but controld isn't running.", "warning" })
     else
       regionScreen(regionName, { text .. ".", "success" })
@@ -63,7 +67,7 @@ local function featurePicker(r, all)
   kit.addText(3, "Tap a feature to add it.")
   local list = kit.addList(5, kit.H, "All features are added.")
   for _, fname in ipairs(kit.sortedKeys(all)) do
-    if not r.features[fname] then
+    if not r.features[fname] and all[fname].available ~= false then
       list:addItem({ text = " " .. fname, callback = function() kit.task(featureForm, r.name, all[fname], nil) end })
       for _, line in ipairs(kit.wrap(all[fname].description or "", kit.W - 3)) do
         list:addItem({ text = "  " .. line, fg = C.muted, selectable = false })
@@ -77,6 +81,14 @@ end
 -- Region screen: its size, then one list with its shapes and features.
 
 local shapePicker -- defined below
+
+-- The toast after a shape change: features' warnings if there are any.
+local function shapeFlash(text, result)
+  if type(result) == "table" and result.warnings and #result.warnings > 0 then
+    return { text .. " " .. table.concat(result.warnings, " "), "warning" }
+  end
+  return { text, "success" }
+end
 
 function regionScreen(name, flash)
   local token = kit.newScreen(name, kit.backTo(mainScreen), flash)
@@ -102,8 +114,9 @@ function regionScreen(name, flash)
         return kit.toast("A region needs at least one shape.", "info", 3)
       end
       kit.confirm(r.name, "Remove " .. shapes.describe(s) .. "?", function()
-        if kit.call("regions.removeShape", r.name, i) then
-          regionScreen(r.name, { "Shape removed.", "success" })
+        local result = kit.call("regions.removeShape", r.name, i)
+        if result then
+          regionScreen(r.name, shapeFlash("Shape removed.", result))
         end
       end)
     end)
@@ -114,8 +127,9 @@ function regionScreen(name, flash)
         return kit.toast("That's in another dimension than the region.", "error", 4)
       end
       kit.confirm(r.name, "Add " .. shapes.describe(shape) .. "?", function()
-        if kit.call("regions.addShape", r.name, shape) then
-          regionScreen(r.name, { "Shape added.", "success" })
+        local result = kit.call("regions.addShape", r.name, shape)
+        if result then
+          regionScreen(r.name, shapeFlash("Shape added.", result))
         end
       end)
     end)
@@ -124,10 +138,16 @@ function regionScreen(name, flash)
   list:addItem({ text = "", selectable = false })
   header("Features")
   for _, fname in ipairs(kit.sortedKeys(r.features)) do
-    kit.addItem(list, " " .. fname, function()
-      if all[fname] then featureForm(r.name, all[fname], r.features[fname])
+    local warning = r.warnings and r.warnings[fname]
+    kit.addItem(list, " " .. fname .. (warning and "  (!)" or ""), function()
+      if all[fname] then featureForm(r.name, all[fname], r.features[fname], warning)
       else kit.toast("Unknown feature: " .. fname, "error", 4) end
-    end)
+    end, warning and C.warn or nil)
+    if warning then
+      for _, line in ipairs(kit.wrap(warning, kit.W - 5)) do
+        list:addItem({ text = "    " .. line, fg = C.warn, selectable = false })
+      end
+    end
   end
   kit.addItem(list, " + Add feature", function() featurePicker(r, all) end, C.headIcon)
 

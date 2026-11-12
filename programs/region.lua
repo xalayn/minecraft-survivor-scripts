@@ -38,6 +38,7 @@
 --   draw      Show the region's shapes.
 --   boundary  Players can't leave.
 --   killzone  Kills or damages players inside.
+--   protect   Protects it with YAWP flags (needs the YAWP mod).
 --
 -- Examples:
 --   region create arena ~-20 ~ ~-20 ~20 ~30 ~20
@@ -106,6 +107,13 @@ local function describeArea(r)
     a[4] - a[1] + 1, a[5] - a[2] + 1, a[6] - a[3] + 1, (r.dim:gsub("^minecraft:", "")))
 end
 
+-- Print a warning in orange (on color screens).
+local function printWarning(text)
+  if term.isColor() then term.setTextColor(colors.orange) end
+  print(text)
+  term.setTextColor(colors.white)
+end
+
 local function sortedKeys(t)
   local keys = {}
   for k in pairs(t) do keys[#keys + 1] = k end
@@ -150,16 +158,18 @@ end
 
 function commandsBySub.shape()
   local action, name = raw[2], raw[3]
+  local ok, result
   if action == "add" and name then
     local shape, err = shapeFrom(4)
     if not shape then return printError(err) end
-    local ok, r = regionops.addShape(name, shape)
-    if not ok then return printError(r) end
-    print("Added " .. shapes.describe(shape) .. " to '" .. r.name .. "' (now " .. #r.shapes .. " shapes)")
+    ok, result = regionops.addShape(name, shape)
+    if not ok then return printError(result) end
+    print("Added " .. shapes.describe(shape) .. " to '" .. result.region.name .. "' (now " ..
+      #result.region.shapes .. " shapes)")
   elseif action == "remove" and name and raw[4] then
-    local ok, r = regionops.removeShape(name, raw[4])
-    if not ok then return printError(r) end
-    print("Removed shape " .. raw[4] .. " from '" .. r.name .. "'")
+    ok, result = regionops.removeShape(name, raw[4])
+    if not ok then return printError(result) end
+    print("Removed shape " .. raw[4] .. " from '" .. result.region.name .. "'")
   else
     printError("Usage: region shape add <name> <shape> <args...>")
     printError("       region shape remove <name> <number>")
@@ -167,7 +177,9 @@ function commandsBySub.shape()
       local t = shapes.type(n)
       if t then print("  " .. n .. " " .. t.usage) end
     end
+    return
   end
+  for _, w in ipairs(result.warnings) do printWarning("Warning: " .. w) end
 end
 
 function commandsBySub.add()
@@ -188,6 +200,7 @@ function commandsBySub.add()
   local ok, result = regionops.setFeature(name, fname, settings)
   if not ok then return printError(result) end
   if result.message then print(result.message) end
+  if result.warning then printWarning("Warning: " .. result.warning) end
   print("Added " .. fname .. " to '" .. cmd.sanitize(name) .. "'")
   if result.needsDaemon then
     print("Note: controld isn't running, so " .. fname .. " won't be enforced until it is.")
@@ -236,10 +249,15 @@ function commandsBySub.info()
     local parts = {}
     for _, k in ipairs(sortedKeys(r.features[fname])) do
       local v = r.features[fname][k]
-      if type(v) == "table" then v = "\"" .. predicate.toText(v) .. "\"" end
+      if type(v) == "table" and (#v > 0 or next(v) == nil) and not v.all then
+        v = table.concat(v, ",") -- a list
+      elseif type(v) == "table" then
+        v = "\"" .. predicate.toText(v) .. "\"" -- a player rule
+      end
       parts[#parts + 1] = k .. "=" .. tostring(v)
     end
     print("  " .. fname .. (#parts > 0 and (": " .. table.concat(parts, " ")) or ""))
+    if r.warnings[fname] then printWarning("    Warning: " .. r.warnings[fname]) end
   end
   local holder = control.daemon()
   print(holder and ("controld: running on " .. holder) or "controld: not running")
@@ -255,7 +273,8 @@ function commandsBySub.features()
   end
   local _, list = regionops.features()
   for _, f in ipairs(list) do
-    print(string.format("%-9s %s", f.name, f.description or ""))
+    print(string.format("%-9s %s%s", f.name, f.description or "",
+      f.available and "" or (" (unavailable: " .. tostring(f.unavailableReason) .. ")")))
   end
 end
 

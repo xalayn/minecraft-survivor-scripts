@@ -13,10 +13,16 @@
 -- Adding a feature means adding a file there that returns a table with any of:
 --
 --   description  One line shown by `region features`.
+--   available()  Optional: whether the feature can be used here, as ok,
+--                reason (e.g. a required mod is missing). Unavailable
+--                features are hidden from the app and can't be added.
 --   options      Option specs (see lib/args.lua). `region add` parses them and
 --                stores the result as the region's settings for the feature.
---   enable(region, settings) -> ok, message
---                Called once by `region add` (e.g. draw summons the box).
+--   enable(region, settings) -> ok, message[, warning]
+--                Called by `region add` (e.g. draw summons the box), and again
+--                when the region's shapes change. On success, an optional
+--                warning (e.g. "this shape isn't supported") is shown to the
+--                user prominently.
 --   disable(region, settings)
 --                Called once by `region remove`/`region delete` to undo
 --                everything (e.g. release confined players).
@@ -61,6 +67,12 @@ end
 -- Normalize a decoded region (JSON arrays/objects come back as tables).
 local function normalize(r)
   r.features = type(r.features) == "table" and r.features or {}
+  -- Warnings from features' setup (e.g. "this shape isn't supported"), by
+  -- feature name, shown until the cause goes away.
+  r.warnings = type(r.warnings) == "table" and r.warnings or {}
+  for fname in pairs(r.warnings) do
+    if not r.features[fname] then r.warnings[fname] = nil end
+  end
   for name, settings in pairs(r.features) do
     if type(settings) ~= "table" then r.features[name] = {} end
   end

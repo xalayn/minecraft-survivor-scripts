@@ -8,7 +8,7 @@ local function boxName(region)
 end
 
 return {
-  description = "Show the region as a box",
+  description = "Show the region's shapes",
 
   options = {
     { name = "block", type = "string", default = boxdraw.DEFAULT_BLOCK, arg = "<block>", desc = "Edge block",

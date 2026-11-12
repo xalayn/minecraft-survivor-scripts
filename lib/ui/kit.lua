@@ -32,6 +32,7 @@ local C = {
   danger = colors.red, dangerText = colors.white,
   neutral = colors.lightGray, neutralText = colors.black,
   select = colors.lightBlue, selectText = colors.black,
+  warn = colors.orange,
 }
 kit.C = C
 
@@ -126,7 +127,7 @@ function kit.toast(text, kind, seconds)
 end
 
 --- Clear the screen and draw the title bar: a < button if onBack, an x
--- (quit) button if quit. flash: optional { text, kind } toast to show.
+-- (quit) button if quit. flash: optional { text, kind, seconds } toast to show.
 -- Returns the screen's token (see kit.isCurrent).
 function kit.newScreen(title, onBack, flash, quit)
   screen.token = screen.token + 1
@@ -155,7 +156,7 @@ function kit.newScreen(title, onBack, flash, quit)
   screen.back = onBack
   screen.dialog = root:addDialog()
   screen.toast = root:addToast()
-  if flash then screen.toast:show(flash[1], flash[2] or "success", 3) end
+  if flash then screen.toast:show(flash[1], flash[2] or "success", flash[3] or (flash[2] == "warning" and 6 or 3)) end
   return screen.token
 end
 
@@ -264,7 +265,9 @@ end
 
 function kit.optionHint(o)
   local hint = o.hint or o.desc or kit.optionLabel(o)
-  if o.default ~= nil and (o.type or "boolean") ~= "boolean" then
+  if type(o.default) == "table" then
+    hint = hint .. " Default: " .. (#o.default > 0 and table.concat(o.default, ", ") or "none") .. "."
+  elseif o.default ~= nil and (o.type or "boolean") ~= "boolean" then
     hint = hint .. " Default: " .. tostring(o.default) .. "."
   end
   return hint
@@ -448,6 +451,37 @@ function kit.editRule(title, rule, onDone)
   end)
 end
 
+
+--- A checklist overlay for an option with several of a fixed set of values
+-- (o.choices; o.choiceInfo can describe each). onDone(list) gets the result.
+function kit.editChoices(title, o, current, onDone)
+  local frame = kit.openOverlay(title)
+  local set = {}
+  for _, v in ipairs(current) do set[v] = true end
+  local info = frame:addLabel({ x = 2, y = 3, width = W - 2, height = 2, text = "Tap to tick or untick.",
+    foreground = C.muted })
+  local list = frame:addList({ x = 1, y = 6, width = W, height = H - 6, background = C.bg,
+    foreground = C.text, selectionBackground = C.select, selectionForeground = C.selectText })
+  local function rowText(v) return (set[v] and " [x] " or " [ ] ") .. v end
+  for _, v in ipairs(o.choices) do
+    list:addItem({ text = rowText(v), callback = function(_, entry)
+      set[v] = not set[v]
+      entry:setText(rowText(v))
+    end })
+  end
+  -- Describe the highlighted value.
+  list:onSelect(function(_, index)
+    local v = o.choices[index]
+    local d = v and o.choiceInfo and o.choiceInfo[v]
+    if d then info.text = table.concat(kit.wrap(v .. ": " .. d, W - 2), "\n") end
+  end)
+  kit.addButton(frame, 2, H, W - 2, "Done", "primary", function()
+    local out = {}
+    for _, v in ipairs(o.choices) do if set[v] then out[#out + 1] = v end end
+    kit.closeOverlay()
+    onDone(out)
+  end)
+end
 --- A scrollable form from row y to row bottom with one row per option: a
 -- tappable name (shows the hint) and a control (switch, text field, a
 -- button cycling through choices, or a player-rule button). values: current
@@ -481,6 +515,36 @@ function kit.addForm(y, bottom, options, values, parent)
       end)
       show()
       controls[o.name] = { get = function() return rule end }
+      row = row + 1
+    elseif o.type == "list" and o.choices then
+      -- Several of a fixed set: a button showing them; tapping opens a checklist.
+      local chosen = {}
+      for _, v in ipairs(type(value) == "table" and value or {}) do chosen[#chosen + 1] = v end
+      local b = form:addButton({ x = 2, y = row + 1, width = W - 3, height = 1,
+        background = C.field, foreground = C.fieldText })
+      local function show()
+        local s = #chosen == 0 and "none" or table.concat(chosen, ", ")
+        b.text = (#s > W - 3) and (s:sub(1, W - 6) .. "...") or s
+      end
+      b:onClick(function()
+        kit.editChoices(kit.optionLabel(o), o, chosen, function(newList)
+          chosen = newList
+          show()
+        end)
+      end)
+      show()
+      controls[o.name] = { get = function() return chosen end }
+      row = row + 1
+    elseif o.type == "list" then
+      -- Several free values (e.g. player names): comma-separated text.
+      local input = form:addInput({ x = 2, y = row + 1, width = W - 3,
+        text = table.concat(type(value) == "table" and value or {}, ", "), placeholder = "none",
+        background = C.field, foreground = C.fieldText, placeholderColor = C.muted })
+      controls[o.name] = { get = function()
+        local list = {}
+        for w in input.text:gmatch("[^,%s]+") do list[#list + 1] = w end
+        return list
+      end }
       row = row + 1
     elseif (o.type or "boolean") == "boolean" then
       local sw = form:addSwitch({ x = W - 5, y = row, width = 4, checked = value == true,
