@@ -47,6 +47,7 @@
 
 package.path = "/lib/?.lua;" .. package.path
 local argparse = require("args")
+local cmd = require("cmd")
 
 if not commands then
   printError("box requires a Command Computer")
@@ -96,10 +97,8 @@ if not args then
   return
 end
 
-local function sanitize(name)
-  -- Entity tags used in selectors can't contain spaces or most punctuation.
-  return (name:gsub("[^%w_%-%.%+]", "_"))
-end
+local sanitize, execAll, execIn, dimension, lastId =
+  cmd.sanitize, cmd.execAll, cmd.execIn, cmd.dimension, cmd.lastId
 
 local function tagFor(name)
   return BASE_TAG .. "_" .. name
@@ -136,57 +135,6 @@ local function snbtText()
   if a ~= 1 then return a > 1 end
   if b ~= 21 then return b > 21 end
   return c >= 5
-end
-
--- Run commands concurrently and return { ok = bool, out = {lines} } for each,
--- in order. Unlike commands.exec, which waits a server tick per command, these
--- can all complete within the same tick.
-local function execAll(cmds)
-  local index, results, pending = {}, {}, 0
-  for i, cmd in ipairs(cmds) do
-    index[commands.execAsync(cmd)] = i
-    pending = pending + 1
-  end
-  while pending > 0 do
-    local _, id, taskOk, ok, out = os.pullEvent("task_complete")
-    local i = index[id]
-    if i then
-      index[id] = nil
-      pending = pending - 1
-      if taskOk then
-        results[i] = { ok = ok, out = out or {} }
-      else
-        results[i] = { ok = false, out = { tostring(ok) } } -- task error message
-      end
-    end
-  end
-  return results
-end
-
--- The computer's dimension, e.g. "minecraft:overworld". There's no command
--- that just prints it, but forceload query's message names it, forced or not.
--- Depending on the version, the message shows the dimension as a plain ID
--- ("minecraft:overworld") or wrapped ("ResourceKey[minecraft:dimension /
--- minecraft:overworld]"); the dimension's ID is the last namespaced ID in it.
-local function lastId(s)
-  local id
-  for m in (s or ""):gmatch("[%w_%-%.]+:[%w_%-%./]*[%w_%-%.]") do id = m end
-  return id
-end
-
-local currentDim
-local function dimension()
-  if not currentDim then
-    local x, _, z = commands.getBlockPosition()
-    local _, out = commands.exec(string.format("forceload query %d %d", x, z))
-    currentDim = lastId((out and out[1] or ""):match(" in (.-) is ")) or "minecraft:overworld"
-  end
-  return currentDim
-end
-
--- Run a command in a dimension.
-local function execIn(dim, cmd)
-  return commands.exec("execute in " .. dim .. " run " .. cmd)
 end
 
 -- Registry of boxes in command storage, so boxes can be listed and removed
@@ -441,26 +389,9 @@ if #args < 6 then
   return
 end
 
-local cx, cy, cz = commands.getBlockPosition()
-local origin = { cx, cy, cz }
-
-local function parseCoord(s, axis)
-  local rel = s:match("^~(.*)$")
-  if rel then
-    local off = rel == "" and 0 or tonumber(rel)
-    if not off then error("Bad coordinate: " .. s, 0) end
-    return math.floor(origin[axis] + off)
-  end
-  local n = tonumber(s)
-  if not n then error("Bad coordinate: " .. s, 0) end
-  return math.floor(n)
-end
-
-local ok, err = pcall(function()
-  for i = 1, 6 do args[i] = parseCoord(args[i], (i - 1) % 3 + 1) end
-end)
-if not ok then
-  printError(err)
+local area, areaErr = cmd.parseArea(args, 1)
+if not area then
+  printError(areaErr)
   usage()
   return
 end
@@ -480,9 +411,7 @@ if opts["wall-color"] then
 end
 
 -- Block corners (inclusive) and outer bounds (max + 1 so both corner blocks are enclosed).
-local bx0, bx1 = math.min(args[1], args[4]), math.max(args[1], args[4])
-local by0, by1 = math.min(args[2], args[5]), math.max(args[2], args[5])
-local bz0, bz1 = math.min(args[3], args[6]), math.max(args[3], args[6])
+local bx0, by0, bz0, bx1, by1, bz1 = table.unpack(area)
 local x0, x1, y0, y1, z0, z1 = bx0, bx1 + 1, by0, by1 + 1, bz0, bz1 + 1
 local dx, dy, dz = x1 - x0, y1 - y0, z1 - z0
 local t = THICKNESS
