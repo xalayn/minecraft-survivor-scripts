@@ -12,12 +12,13 @@
 --   x1..z2  Corner coordinates. Accept ~ / ~5 relative to this computer.
 --           The box fully encloses both corner blocks.
 --   block   Block to draw edges with (default: lime_concrete).
---   name    Box name (default: "default"). Drawing again with the same name
---           replaces that box.
+--   name    Box name. Drawing again with the same name replaces that box.
+--           Without a name, the box gets the first free name box1, box2, ...
 --   list    Show all boxes in loaded chunks, with their corners and size.
 --   clear   Remove the named box, or all boxes if no name is given.
 --
 -- Options (may appear anywhere after `box`):
+--   --name <name>         Same as the name argument, without having to give a block.
 --   --no-walls            Only draw the edges, no translucent walls.
 --   --opacity <0-100>     Wall opacity in percent (default: 20). Values below
 --                         ~10 may not render at all.
@@ -32,7 +33,7 @@
 --   box 100 64 200 110 70 210
 --   box ~ ~ ~ ~10 ~5 ~10 red_concrete spawn --xray
 --   box ~ ~ ~ ~4 ~4 ~4 --opacity 40 --wall-color 00ffff
---   box ~ ~ ~ ~4 ~4 ~4 --no-walls
+--   box ~ ~ ~ ~4 ~4 ~4 --no-walls --name shed
 --   box list
 --   box clear spawn
 
@@ -60,7 +61,7 @@ local COLORS = {
 local function usage()
   print("Usage:")
   print("  box <x1> <y1> <z1> <x2> <y2> <z2> [block] [name]")
-  print("      [--no-walls] [--opacity <0-100>]")
+  print("      [--name <name>] [--no-walls] [--opacity <0-100>]")
   print("      [--wall-color <color>] [--xray]")
   print("  box list")
   print("  box clear [name]")
@@ -90,6 +91,8 @@ do
         end
       elseif a == "--wall-color" then
         opts.wallColor = value(a)
+      elseif a == "--name" then
+        opts.name = value(a)
       elseif a:sub(1, 2) == "--" then
         error("Unknown option: " .. a, 0)
       else
@@ -162,7 +165,8 @@ local function clear(name)
   print(ok and (out[1] or "Cleared") or ("Nothing to clear (" .. (out[1] or "?") .. ")"))
 end
 
-local function list()
+-- Boxes in loaded chunks, as { name, from = "x,y,z", to = "x,y,z" }.
+local function findBoxes()
   local _, out = commands.exec(
     "execute as @e[type=minecraft:block_display,tag=" .. BASE_TAG .. "] run data get entity @s Tags")
   local boxes = {}
@@ -173,6 +177,20 @@ local function list()
       if name then boxes[#boxes + 1] = { name = name, from = a, to = b } end
     end
   end
+  return boxes
+end
+
+-- First "boxN" name not used by a box in loaded chunks.
+local function nextFreeName()
+  local used = {}
+  for _, bx in ipairs(findBoxes()) do used[bx.name] = true end
+  local n = 1
+  while used["box" .. n] do n = n + 1 end
+  return "box" .. n
+end
+
+local function list()
+  local boxes = findBoxes()
   if #boxes == 0 then
     print("No boxes found in loaded chunks.")
     return
@@ -224,7 +242,8 @@ if not ok then
 end
 
 local block = withNamespace(args[7] or "lime_concrete")
-local name = sanitize(args[8] or "default")
+local givenName = opts.name or args[8]
+local name = givenName and sanitize(givenName) or nextFreeName()
 local _, edgeRGB = colorOf(block)
 
 local wallRGB = edgeRGB or 0xFFFFFF
