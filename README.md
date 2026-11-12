@@ -1,6 +1,6 @@
 # Minecraft Survivor Scrips
 
-This repo contains programs for CC:Tweaked. Anything in `programs/` gets installed to `/bin` on the computer.
+This repo contains programs for CC:Tweaked. Anything in `programs/` gets installed to `/bin` on the computer, and shared modules in `lib/` go to `/lib`.
 
 ## Installation
 

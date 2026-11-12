@@ -7,7 +7,8 @@
 -- Usage:
 --   box <x1> <y1> <z1> <x2> <y2> <z2> [block] [name] [options]
 --   box list
---   box clear [name]
+--   box remove <name>
+--   box clear [-y]
 --
 --   x1..z2  Corner coordinates. Accept ~ / ~5 relative to this computer.
 --           The box fully encloses both corner blocks.
@@ -15,9 +16,11 @@
 --   name    Box name. Drawing again with the same name replaces that box.
 --           Without a name, the box gets the first free name box1, box2, ...
 --   list    Show all boxes in loaded chunks, with their corners and size.
---   clear   Remove the named box, or all boxes if no name is given.
+--   remove  Remove the box with that name.
+--   clear   Remove all boxes in loaded chunks. Asks for confirmation first.
 --
 -- Options (may appear anywhere after `box`):
+--   -y, --yes             clear: don't ask for confirmation.
 --   --name <name>         Same as the name argument, without having to give a block.
 --   --no-walls            Only draw the edges, no translucent walls.
 --   --opacity <0-100>     Wall opacity in percent (default: 20). Values below
@@ -35,7 +38,11 @@
 --   box ~ ~ ~ ~4 ~4 ~4 --opacity 40 --wall-color 00ffff
 --   box ~ ~ ~ ~4 ~4 ~4 --no-walls --name shed
 --   box list
---   box clear spawn
+--   box remove spawn
+--   box clear
+
+package.path = "/lib/?.lua;" .. package.path
+local argparse = require("args")
 
 if not commands then
   printError("box requires a Command Computer")
@@ -58,54 +65,32 @@ local COLORS = {
   { "lime", 0xBFFF00 }, { "red", 0xFF0000 },
 }
 
+local OPTIONS = {
+  { name = "yes", short = "y", desc = "clear: don't ask" },
+  { name = "name", type = "string", desc = "Box name" },
+  { name = "walls", default = true, desc = "No walls" },
+  { name = "opacity", type = "number", default = DEFAULT_OPACITY, min = 0, max = 100,
+    arg = "<0-100>", desc = "Wall opacity %" },
+  { name = "wall-color", type = "string", arg = "<color>", desc = "Dye name or RRGGBB" },
+  { name = "xray", desc = "Edges visible through blocks" },
+}
+
 local function usage()
   print("Usage:")
   print("  box <x1> <y1> <z1> <x2> <y2> <z2> [block] [name]")
-  print("      [--name <name>] [--no-walls] [--opacity <0-100>]")
-  print("      [--wall-color <color>] [--xray]")
   print("  box list")
-  print("  box clear [name]")
+  print("  box remove <name>")
+  print("  box clear [-y]")
   print("Coords accept ~ for relative to this computer.")
+  print("Options:")
+  for _, line in ipairs(argparse.help(OPTIONS)) do print(line) end
 end
 
--- Split flags from positional args.
-local args, opts = {}, { walls = true, xray = false, opacity = DEFAULT_OPACITY }
-do
-  local raw, i = { ... }, 1
-  local function value(flag)
-    i = i + 1
-    if raw[i] == nil then error(flag .. " needs a value", 0) end
-    return raw[i]
-  end
-  local ok, err = pcall(function()
-    while i <= #raw do
-      local a = raw[i]
-      if a == "--no-walls" then
-        opts.walls = false
-      elseif a == "--xray" then
-        opts.xray = true
-      elseif a == "--opacity" then
-        opts.opacity = tonumber(value(a))
-        if not opts.opacity or opts.opacity < 0 or opts.opacity > 100 then
-          error("--opacity must be 0-100", 0)
-        end
-      elseif a == "--wall-color" then
-        opts.wallColor = value(a)
-      elseif a == "--name" then
-        opts.name = value(a)
-      elseif a:sub(1, 2) == "--" then
-        error("Unknown option: " .. a, 0)
-      else
-        args[#args + 1] = a
-      end
-      i = i + 1
-    end
-  end)
-  if not ok then
-    printError(err)
-    usage()
-    return
-  end
+local args, opts = argparse.parse(OPTIONS, { ... })
+if not args then
+  printError(opts)
+  usage()
+  return
 end
 
 local function sanitize(name)
@@ -159,10 +144,27 @@ local function run(cmd)
   return ok
 end
 
-local function clear(name)
-  local tag = name and tagFor(sanitize(name)) or BASE_TAG
-  local ok, out = commands.exec("kill @e[tag=" .. tag .. "]")
-  print(ok and (out[1] or "Cleared") or ("Nothing to clear (" .. (out[1] or "?") .. ")"))
+local function remove(name)
+  name = sanitize(name)
+  local ok = commands.exec("kill @e[tag=" .. tagFor(name) .. "]")
+  if ok then
+    print("Removed box '" .. name .. "'")
+  else
+    printError("No box named '" .. name .. "' in loaded chunks")
+  end
+end
+
+local function clear(skipConfirm)
+  if not skipConfirm then
+    write("Remove ALL boxes in loaded chunks? [y/N] ")
+    local answer = read()
+    if not answer or answer:lower() ~= "y" and answer:lower() ~= "yes" then
+      print("Cancelled.")
+      return
+    end
+  end
+  local ok, out = commands.exec("kill @e[tag=" .. BASE_TAG .. "]")
+  print(ok and (out[1] or "Cleared") or "No boxes to clear")
 end
 
 -- Boxes in loaded chunks, as { name, from = "x,y,z", to = "x,y,z" }.
@@ -205,7 +207,14 @@ local function list()
 end
 
 if args[1] == "clear" then
-  clear(args[2])
+  clear(opts.yes)
+  return
+elseif args[1] == "remove" then
+  if not args[2] then
+    printError("Usage: box remove <name>")
+    return
+  end
+  remove(args[2])
   return
 elseif args[1] == "list" then
   list()
@@ -247,10 +256,10 @@ local name = givenName and sanitize(givenName) or nextFreeName()
 local _, edgeRGB = colorOf(block)
 
 local wallRGB = edgeRGB or 0xFFFFFF
-if opts.wallColor then
-  wallRGB = parseColor(opts.wallColor)
+if opts["wall-color"] then
+  wallRGB = parseColor(opts["wall-color"])
   if not wallRGB then
-    printError("Bad --wall-color: " .. opts.wallColor)
+    printError("Bad --wall-color: " .. opts["wall-color"])
     return
   end
 end
@@ -383,7 +392,7 @@ for _, cmd in ipairs(parts) do
 end
 
 if failed == 0 then
-  local walls = opts.walls and string.format(", walls %d%% #%06X", opts.opacity, wallRGB) or ""
+  local walls = opts.walls and string.format(", walls %s%% #%06X", tostring(opts.opacity), wallRGB) or ""
   print(string.format("Box '%s' drawn: %dx%dx%d (%s%s%s)", name, dx, dy, dz, block,
     walls, opts.xray and ", xray" or ""))
 else

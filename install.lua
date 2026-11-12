@@ -10,8 +10,12 @@
 local OWNER = "xalayn"
 local REPO = "minecraft-survivor-scripts"
 
-local SRC_DIR = "programs/" -- files under this repo folder...
-local DEST_DIR = "/bin/"    -- ...are installed here
+-- Repo folder -> install location on the computer.
+local DIRS = {
+  { "programs/", "/bin/" }, -- runnable by name (added to the shell path)
+  { "lib/", "/lib/" },      -- shared modules: package.path = "/lib/?.lua;" .. package.path
+}
+local BIN_DIR = "/bin"
 
 local ref = ({ ... })[1] or "HEAD"
 
@@ -53,9 +57,14 @@ end
 
 local count = 0
 for _, entry in ipairs(tree.tree) do
-  if entry.type == "blob" and entry.path:sub(1, #SRC_DIR) == SRC_DIR then
-    download(entry.path, DEST_DIR .. entry.path:sub(#SRC_DIR + 1))
-    count = count + 1
+  if entry.type == "blob" then
+    for _, d in ipairs(DIRS) do
+      local src, dest = d[1], d[2]
+      if entry.path:sub(1, #src) == src then
+        download(entry.path, dest .. entry.path:sub(#src + 1))
+        count = count + 1
+      end
+    end
   end
 end
 
@@ -66,11 +75,11 @@ download("install.lua", "/install.lua")
 local startup = "/startup/00-bin-path.lua"
 if not fs.exists(startup) then
   local f = fs.open(startup, "w")
-  f.write('shell.setPath(shell.path() .. ":' .. DEST_DIR:sub(1, -2) .. '")\n')
+  f.write('shell.setPath(shell.path() .. ":' .. BIN_DIR .. '")\n')
   f.close()
 end
-if not shell.path():find(DEST_DIR:sub(1, -2), 1, true) then
-  shell.setPath(shell.path() .. ":" .. DEST_DIR:sub(1, -2))
+if not shell.path():find(BIN_DIR, 1, true) then
+  shell.setPath(shell.path() .. ":" .. BIN_DIR)
 end
 
-print(("Installed %d program(s) to %s"):format(count, DEST_DIR))
+print(("Installed %d file(s)"):format(count))
