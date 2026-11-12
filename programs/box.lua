@@ -149,12 +149,21 @@ end
 
 -- The computer's dimension, e.g. "minecraft:overworld". There's no command
 -- that just prints it, but forceload query's message names it, forced or not.
+-- Depending on the version, the message shows the dimension as a plain ID
+-- ("minecraft:overworld") or wrapped ("ResourceKey[minecraft:dimension /
+-- minecraft:overworld]"); the dimension's ID is the last namespaced ID in it.
+local function lastId(s)
+  local id
+  for m in (s or ""):gmatch("[%w_%-%.]+:[%w_%-%./]*[%w_%-%.]") do id = m end
+  return id
+end
+
 local currentDim
 local function dimension()
   if not currentDim then
     local x, _, z = commands.getBlockPosition()
     local _, out = commands.exec(string.format("forceload query %d %d", x, z))
-    currentDim = (out and out[1] or ""):match(" in (%S+) is ") or "minecraft:overworld"
+    currentDim = lastId((out and out[1] or ""):match(" in (.-) is ")) or "minecraft:overworld"
   end
   return currentDim
 end
@@ -179,7 +188,8 @@ local function parseEntry(s)
     if not from then return nil end
     dim = dimension()
   end
-  local e = { dim = dim, from = {}, to = {}, count = tonumber(count), chunks = {} }
+  -- lastId also repairs entries saved with a mangled dimension by older versions.
+  local e = { dim = lastId(dim) or dimension(), from = {}, to = {}, count = tonumber(count), chunks = {} }
   for n in from:gmatch("-?%d+") do e.from[#e.from + 1] = tonumber(n) end
   for n in to:gmatch("-?%d+") do e.to[#e.to + 1] = tonumber(n) end
   for a, b in chunkList:gmatch("(-?%d+),(-?%d+)") do
