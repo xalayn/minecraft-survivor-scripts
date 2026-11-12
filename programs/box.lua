@@ -10,7 +10,7 @@
 --
 --   x1..z2  Corner coordinates. Accept ~ / ~5 relative to this computer.
 --           The box fully encloses both corner blocks.
---   block   Block to draw edges with (default: lime_stained_glass).
+--   block   Block to draw edges with (default: lime_concrete).
 --   name    Box name (default: "default"). Drawing again with the same name
 --           replaces that box.
 --   clear   Remove the named box, or all boxes if no name is given.
@@ -91,7 +91,7 @@ if not ok then
   return
 end
 
-local block = args[7] or "minecraft:lime_stained_glass"
+local block = args[7] or "minecraft:lime_concrete"
 if not block:find(":") then block = "minecraft:" .. block end
 local name = args[8] or "default"
 
@@ -105,31 +105,42 @@ local t = THICKNESS
 local tags = string.format('Tags:["%s","%s"]', BASE_TAG, tagFor(name))
 
 local function edge(x, y, z, sx, sy, sz)
+  -- The client culls a display entity using its width/height box (centered
+  -- horizontally on the entity, extending up). The default is 0x0, which hides
+  -- the whole edge whenever its origin corner is off-screen, so size the box to
+  -- cover the rendered edge. view_range keeps large boxes visible from afar.
+  local width = 2 * math.max(sx, sz)
   return string.format(
     "summon minecraft:block_display %.4f %.4f %.4f {block_state:{Name:\"%s\"},"
       .. "transformation:{left_rotation:[0f,0f,0f,1f],right_rotation:[0f,0f,0f,1f],"
       .. "translation:[0f,0f,0f],scale:[%.4ff,%.4ff,%.4ff]},"
+      .. "width:%.4ff,height:%.4ff,view_range:4f,"
       .. "brightness:{sky:15,block:15},%s}",
-    x, y, z, block, sx, sy, sz, tags)
+    x, y, z, block, sx, sy, sz, width, sy, tags)
 end
 
 -- Redrawing a box with the same name replaces it.
 commands.exec("kill @e[type=minecraft:block_display,tag=" .. tagFor(name) .. "]")
 
+-- Edges are centered on the box boundary (half inside, half outside) so none
+-- of their faces are coplanar with block faces (no z-fighting with terrain).
+-- X edges run the full length including the corner cubes; Y and Z edges stop
+-- short of the corners so edges never overlap each other either.
+local h = t / 2
 local edges = {}
-for _, a in ipairs({ y0, y1 - t }) do
-  for _, b in ipairs({ z0, z1 - t }) do
-    edges[#edges + 1] = edge(x0, a, b, dx, t, t) -- along X
+for _, a in ipairs({ y0 - h, y1 - h }) do
+  for _, b in ipairs({ z0 - h, z1 - h }) do
+    edges[#edges + 1] = edge(x0 - h, a, b, dx + t, t, t) -- along X
   end
 end
-for _, a in ipairs({ x0, x1 - t }) do
-  for _, b in ipairs({ z0, z1 - t }) do
-    edges[#edges + 1] = edge(a, y0, b, t, dy, t) -- along Y
+for _, a in ipairs({ x0 - h, x1 - h }) do
+  for _, b in ipairs({ z0 - h, z1 - h }) do
+    edges[#edges + 1] = edge(a, y0 + h, b, t, dy - t, t) -- along Y
   end
 end
-for _, a in ipairs({ x0, x1 - t }) do
-  for _, b in ipairs({ y0, y1 - t }) do
-    edges[#edges + 1] = edge(a, b, z0, t, t, dz) -- along Z
+for _, a in ipairs({ x0 - h, x1 - h }) do
+  for _, b in ipairs({ y0 - h, y1 - h }) do
+    edges[#edges + 1] = edge(a, b, z0 + h, t, t, dz - t) -- along Z
   end
 end
 
