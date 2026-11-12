@@ -73,17 +73,37 @@ local function download(path, dest)
   print("  " .. dest)
 end
 
-local count = 0
+local count, installed = 0, {}
 for _, entry in ipairs(tree.tree) do
   if entry.type == "blob" then
     for _, d in ipairs(DIRS) do
       local src, dest = d[1], d[2]
       if entry.path:sub(1, #src) == src then
-        download(entry.path, dest .. entry.path:sub(#src + 1))
+        local target = dest .. entry.path:sub(#src + 1)
+        download(entry.path, target)
+        installed[target] = true
         count = count + 1
       end
     end
   end
+end
+
+-- Delete files installed last time that are no longer in the repo.
+local MANIFEST = "/.installed"
+if fs.exists(MANIFEST) then
+  local f = fs.open(MANIFEST, "r")
+  for line in f.readAll():gmatch("[^\n]+") do
+    if not installed[line] and fs.exists(line) then
+      fs.delete(line)
+      print("  removed " .. line)
+    end
+  end
+  f.close()
+end
+do
+  local f = fs.open(MANIFEST, "w")
+  for path in pairs(installed) do f.write(path .. "\n") end
+  f.close()
 end
 
 -- Make /bin programs runnable by name on every boot.

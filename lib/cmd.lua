@@ -95,4 +95,85 @@ function M.parseArea(args, first)
   }
 end
 
+--- Quote a string as an SNBT string literal.
+function M.snbtQuote(s)
+  return "'" .. (s:gsub("\\", "\\\\"):gsub("'", "\\'")) .. "'"
+end
+
+-- Read a quoted SNBT string starting at s[i] (the quote). Returns the string
+-- and the index after the closing quote, or nil.
+local function readQuoted(s, i)
+  local q, buf = s:sub(i, i), {}
+  i = i + 1
+  while i <= #s do
+    local c = s:sub(i, i)
+    if c == "\\" then
+      buf[#buf + 1] = s:sub(i + 1, i + 1)
+      i = i + 2
+    elseif c == q then
+      return table.concat(buf), i + 1
+    else
+      buf[#buf + 1] = c
+      i = i + 1
+    end
+  end
+end
+
+--- Parse `data get storage` output holding a single string value.
+function M.parseStoredString(lines)
+  local text = table.concat(lines or {}, " ")
+  local i = text:find(": ['\"]")
+  if not i then return nil end
+  return (readQuoted(text, i + 2))
+end
+
+--- Parse `data get storage` output holding a compound of string values,
+-- like {a: "x", "b.c": 'y'}, into a table. Non-string values are skipped.
+function M.parseStringCompound(lines)
+  local text = table.concat(lines or {}, " ")
+  local result = {}
+  local i = text:find("{", 1, true)
+  if not i then return result end
+  i = i + 1
+  while i <= #text do
+    i = text:find("[^%s,]", i)
+    if not i or text:sub(i, i) == "}" then break end
+    local key
+    if text:sub(i, i):match("['\"]") then
+      key, i = readQuoted(text, i)
+    else
+      key = text:match("^[%w_%-%.%+]+", i)
+      i = key and i + #key
+    end
+    if not key then break end
+    i = text:find("[^%s]", text:find(":", i, true) + 1)
+    if text:sub(i, i):match("['\"]") then
+      local value
+      value, i = readQuoted(text, i)
+      if not value then break end
+      result[key] = value
+    else
+      -- Skip a non-string value.
+      i = text:find("[,}]", i)
+      if not i then break end
+    end
+  end
+  return result
+end
+
+--- Parse `execute as ... run data get entity @s Pos` output lines into a list
+-- of { name, x, y, z }.
+function M.parsePositions(lines)
+  local players = {}
+  for _, line in ipairs(lines or {}) do
+    local player, list = line:match("^(%S+) has the following entity data: %[(.-)%]")
+    if player then
+      local v = {}
+      for n in list:gmatch("%-?[%d%.]+[eE]?[%-+]?%d*") do v[#v + 1] = tonumber(n) end
+      if #v == 3 then players[#players + 1] = { name = player, x = v[1], y = v[2], z = v[3] } end
+    end
+  end
+  return players
+end
+
 return M
