@@ -229,6 +229,7 @@ local function withChunksLoaded(dim, chunks, fn)
       added[#added + 1] = c
     end
   end
+  if #added > 0 then print(string.format("Loading %d chunk(s)...", #added)) end
   local ok, err = pcall(fn)
   for _, c in ipairs(added) do
     execIn(dim, string.format("forceload remove %d %d", c[1] * 16, c[2] * 16))
@@ -236,7 +237,9 @@ local function withChunksLoaded(dim, chunks, fn)
   if not ok then error(err, 0) end
 end
 
-local LOAD_TIMEOUT = 5 -- seconds to wait for forceloaded chunks/entities
+-- Seconds to wait for forceloaded chunks and their entities. Generous because
+-- far-away chunks may need loading from disk or even generating first.
+local LOAD_TIMEOUT = 30
 
 -- Wait until all the chunks of a dimension are loaded. Returns false on timeout.
 local function waitLoaded(dim, chunks)
@@ -273,8 +276,11 @@ local function killBox(name, entry)
   end
   local killed = 0
   withChunksLoaded(entry.dim, entry.chunks, function()
-    -- Entities load a little after their chunk does, so keep killing until all
-    -- of them are gone or we time out.
+    -- `if loaded` (used by waitLoaded) also requires the chunk's entities to
+    -- be loaded, but keep killing until all are gone in case some lag behind.
+    killed = killed + kill(selector)
+    if killed >= entry.count then return end
+    waitLoaded(entry.dim, entry.chunks)
     local deadline = os.clock() + LOAD_TIMEOUT
     repeat
       killed = killed + kill(selector)
@@ -546,7 +552,11 @@ local failed = 0
 local dim = dimension()
 withChunksLoaded(dim, chunks, function()
   if not waitLoaded(dim, chunks) then
-    printError("Timed out waiting for chunks to load")
+    -- Summoning into a chunk that isn't loaded can leave entities in limbo
+    -- where commands can't reach them, so don't.
+    printError("Timed out waiting for chunks to load; box not drawn. Try again.")
+    failed = #parts
+    return
   end
   for _, cmd in ipairs(parts) do
     if not run(cmd) then failed = failed + 1 end
